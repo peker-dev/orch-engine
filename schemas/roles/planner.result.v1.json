@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orch-engine/schemas/roles/planner.result.v1.json",
+  "title": "Planner Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "plan_summary",
+    "tasks",
+    "risks"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "plan_summary": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "acceptance",
+          "priority",
+          "notes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "acceptance": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orch-engine/schemas/adapter/invocation.v1.json",
+  "title": "Adapter Invocation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "request_id",
+    "provider",
+    "role",
+    "objective",
+    "working_directory",
+    "mode",
+    "context_summary",
+    "input_files",
+    "write_scope",
+    "output_schema_path",
+    "timeout_sec"
+  ],
+  "properties": {
+    "version": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string",
+      "enum": [
+        "claude_cli",
+        "codex_cli"
+      ]
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "planner",
+        "builder",
+        "verifier_functional",
+        "verifier_human"
+      ]
+    },
+    "objective": {
+      "type": "string"
+    },
+    "working_directory": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string"
+    },
+    "context_summary": {
+      "type": "string"
+    },
+    "input_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "reason"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "write_scope": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "output_schema_path": {
+      "type": "string"
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "token_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_reserve": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

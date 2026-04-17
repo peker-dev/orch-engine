@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orch-engine/schemas/roles/builder.result.v1.json",
+  "title": "Builder Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "change_summary",
+    "files_changed",
+    "artifact_paths",
+    "self_check"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "change_summary": {
+      "type": "string"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifact_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "self_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "unresolved"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
