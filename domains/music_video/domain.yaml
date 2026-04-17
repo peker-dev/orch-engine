@@ -1,0 +1,396 @@
+{
+  "meta": {
+    "domain_id": "music_video",
+    "version": "0.2.0",
+    "display_name": "Music & Music Video",
+    "summary": "페르소나 5인 토론 기반 발라드 작사/작곡 + AI 보이스 클로닝 + AI 실사 뮤직비디오 제작 워크플로 (6단계 폴더 파이프라인)",
+    "default_mode": "retrofit",
+    "maturity": "calibrated"
+  },
+  "supports": {
+    "modes": ["greenfield", "retrofit", "resume"],
+    "project_types": [
+      "ballad_song_full",
+      "short_form_music_video",
+      "lyrics_only",
+      "instrumental_mock"
+    ],
+    "platforms": ["documents", "audio", "video"],
+    "runtime_profiles": ["local_docs"],
+    "verification_profiles": ["persona_review_5", "vocal_feasibility_gate"]
+  },
+  "intake": {
+    "required": [
+      "genre (e.g. 발라드, 록발라드, 시티팝, 어쿠스틱)",
+      "theme (한 문장으로 정서/상황 요약)",
+      "language (ko / en / 혼합)",
+      "vocal_strategy (ai_cloning | direct_record | hybrid)",
+      "ai_composition_tool (Suno | Udio | none)"
+    ],
+    "optional": [
+      "reference_tracks",
+      "vocal_difficulty_ceiling (초급/중급/고급)",
+      "target_duration_seconds",
+      "target_pd (default: 사용자 본인)"
+    ],
+    "auto_detect": [
+      "01_기획/ 02_페르소나/ 03_작사/ 04_작곡/ 05_뮤직비디오/ 06_최종/ folder convention",
+      "memory/project-overview.md",
+      "memory/project-status.md"
+    ],
+    "ask_when_missing": [
+      "If no genre: ask 발라드 / 록 / 어쿠스틱 / 기타",
+      "If no vocal_strategy: ask AI 클로닝 / 직접 녹음 / 하이브리드"
+    ],
+    "normalize_rules": [
+      "stage folder names must match {NN_stage_kor}",
+      "meeting log filenames: {YYYY-MM-DD}_{주제}.md under the relevant stage folder",
+      "Suno prompt filenames: suno_prompt_v{N}.md"
+    ]
+  },
+  "outputs": {
+    "primary": [
+      "01_기획/concept.md + 기획 회의록",
+      "02_페르소나/{페르소나명}.md",
+      "03_작사/{곡_제목}_lyrics_v{N}.md",
+      "04_작곡/suno_prompt_v{N}.md + 04_작곡/melody_structure_v{N}.md",
+      "05_뮤직비디오/{씬번호}_{씬제목}.md + 05_뮤직비디오/mv_storyboard_v{N}.md",
+      "06_최종/final_notes.md + 06_최종/release_plan.md"
+    ],
+    "secondary": [
+      "memory/project-status.md (stage progression updates)",
+      "memory/handoff.md (session close state)"
+    ],
+    "review_artifacts": [
+      "persona_review_notes.md (5-persona per-angle findings)",
+      "vocal_feasibility_result.json (range, difficulty, high-note risk)",
+      "stage_coherence_log.md (previous stage → current stage linkage)"
+    ],
+    "completion_signal": [
+      "current stage deliverable complete and placed in its own folder",
+      "5 personas each logged an opinion",
+      "PD 확정 markup recorded",
+      "next-stage readiness checklist passed (especially vocal feasibility)"
+    ]
+  },
+  "scaffold": {
+    "required_structure": [
+      "project-root.md",
+      "memory/MEMORY.md",
+      "memory/project-overview.md",
+      "memory/project-status.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md",
+      "memory/handoff.md",
+      "01_기획/",
+      "02_페르소나/",
+      "03_작사/",
+      "04_작곡/",
+      "05_뮤직비디오/",
+      "06_최종/"
+    ],
+    "optional_structure": [
+      "참고곡/",
+      "레퍼런스_MV/",
+      "보이스_샘플/"
+    ],
+    "seed_files": [
+      "memory/project-overview.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md"
+    ],
+    "preserve_rules": [
+      "confirmed genre/theme/language/tool choices: do not overwrite without user request",
+      "06_최종/ contents: write only after stages 01-05 are all confirmed",
+      "persona files: additions OK, but confirmed personas must not be renamed without PD approval",
+      "older stage files: keep for audit — new versions go as v{N+1}"
+    ],
+    "bootstrap_steps": [
+      "1. confirm genre + theme + language + vocal_strategy",
+      "2. seed 5-persona roster under 02_페르소나/ (default: 서정아/한비트/윤프로/채원/민수)",
+      "3. create empty 01~06 stage folders with a one-line purpose note",
+      "4. generate MEMORY.md index pointing at project-overview + workflow-rules"
+    ]
+  },
+  "planning": {
+    "goal_split_rules": [
+      "1 planning unit = 1 stage milestone (기획 → 페르소나 → 작사 → 작곡 → 뮤직비디오 → 최종)",
+      "within a stage, split tasks by deliverable (e.g. 작사: 1절 / 후렴 / 2절 각각 별 task)"
+    ],
+    "task_unit_rules": [
+      "1 task = 1 stage deliverable OR 1 persona meeting OR 1 AI-tool prompt version",
+      "task title must state the stage + deliverable (e.g. `03 작사: 후렴 초안 v1`)"
+    ],
+    "priority_rules": [
+      "current stage completion is top priority",
+      "next-stage prep materials are second",
+      "revisiting a prior stage requires explicit PD handoff"
+    ],
+    "acceptance_rules": [
+      "5 persona opinions logged (서정아/한비트/윤프로/채원/민수 모두 발언)",
+      "PD confirmation marker present",
+      "vocal feasibility annotation attached",
+      "project-status.md updated with stage transition"
+    ],
+    "replan_triggers": [
+      "vocal feasibility breach (난이도 상한선 초과)",
+      "theme drift (기획 확정 정서와 현재 산출물 괴리)",
+      "PD direction override",
+      "AI tool limitation (Suno 길이/장르 한계 등)"
+    ]
+  },
+  "builder": {
+    "execution_rules": [
+      "clarify the current stage's goal in one line before producing anything",
+      "each of 5 personas must speak from their angle (가사/멜로디/프로듀싱/보컬/청중)",
+      "PD makes the final call — record the decision explicitly",
+      "write deliverables ONLY under their own stage folder (no cross-stage mixing)",
+      "annotate vocal feasibility (음역대, 고음 지점, 호흡 난이도) when any vocal-bearing artifact is produced"
+    ],
+    "change_scope_rules": [
+      "new deliverable: create a new file under the stage folder, never overwrite a confirmed version",
+      "prompt/version iteration: increment v{N} rather than editing the previous version in place",
+      "06_최종/ is write-only after stages 01-05 confirmed"
+    ],
+    "artifact_rules": [
+      "persona meeting logs: file path under the current-stage folder, dated",
+      "Suno prompt: include tool version + generation parameters",
+      "MV storyboard: one file per scene with scene number + duration estimate"
+    ],
+    "self_check_rules": [
+      "current-stage objective listed at top of the deliverable",
+      "all 5 personas' voices present in meeting logs for this stage",
+      "vocal feasibility annotation exists when the artifact affects singing",
+      "no cross-stage leakage (e.g. 작사 파일에 MV 콘티가 섞이지 않음)",
+      "no unconfirmed idea leaked into 06_최종/"
+    ],
+    "handoff_back_rules": [
+      "vocal feasibility uncertain → handoff(review_only) citing the high-risk phrase",
+      "persona disagreement deadlock → handoff(approve_gate) for PD decision",
+      "AI tool cannot achieve the intent (예: Suno가 특정 장르 미지원) → handoff(replan_pass)"
+    ]
+  },
+  "verify_functional": {
+    "required_checks": [
+      "deliverable file is under the correct stage folder (no cross-stage mixing)",
+      "all 5 personas' names appear in the meeting log for this stage",
+      "vocal feasibility annotation present when relevant",
+      "PD confirmation marker present for finalized stage deliverable",
+      "confirmed settings (genre/theme/language/tool) unchanged unless an approval exists"
+    ],
+    "ground_truth_sources": [
+      "memory/project-overview.md (confirmed genre/theme/tools)",
+      "memory/project-status.md (current stage)",
+      "memory/workflow-rules.md (persona list)"
+    ],
+    "execution_steps": [
+      "1. verify file path is under {stage}/",
+      "2. grep for 5 persona names in meeting logs",
+      "3. grep for vocal feasibility markers (음역대/고음/난이도)",
+      "4. cross-check with project-overview.md for any setting drift"
+    ],
+    "pass_fail_rules": [
+      "hard fail: cross-stage file placement",
+      "hard fail: any persona missing from a meeting that should have all 5",
+      "hard fail: confirmed setting silently changed",
+      "soft fail (needs_iteration): vocal feasibility annotation weak, emotion line unclear"
+    ],
+    "evidence_required": [
+      "offending file path + line reference",
+      "missing persona name list",
+      "cited project-overview.md section if a setting was altered"
+    ]
+  },
+  "verify_human": {
+    "review_axes": [
+      "emotion_line_consistency (기획 정서와 현재 산출물의 정합)",
+      "vocal_feasibility (PD이 실제로 부를 수 있는 난이도인지)",
+      "stage_coherence (직전 단계와의 연결성)",
+      "audience_resonance (청중 체감)",
+      "pd_intent_alignment (PD의 방향 반영 여부)"
+    ],
+    "personas": [
+      "서정아 (작사가): 가사의 감정선과 서사",
+      "한비트 (작곡가): 멜로디 흐름, 코드 진행, 후렴 훅",
+      "윤프로 (프로듀서): 전체 사운드 밸런스, 장르 일관성",
+      "채원 (보컬 디렉터): 보컬 난이도, 음역대, 발음 포인트",
+      "민수 (청중 대표): 첫 감상의 인상, 반복 청취 욕구"
+    ],
+    "reference_comparison": [
+      "diff against the immediately previous stage's confirmed output",
+      "reference-track shape comparison (if reference tracks provided)"
+    ],
+    "quality_rubric": [
+      "A: all 5 personas agree + emotion line + vocal feasibility + stage coherence all satisfied",
+      "B: one axis needs minor tweak (e.g. 후렴 고음 반 음 낮추기)",
+      "C: 2+ axes weak, meaningful revision needed",
+      "reject: confirmed theme abandoned, vocal infeasible, or cross-stage leakage"
+    ],
+    "approval_rules": [
+      "C or below → result=changes_made with persona findings",
+      "vocal infeasible or theme abandoned → result=rejected",
+      "grade A with 5-persona consensus + PD approval → result=approved"
+    ]
+  },
+  "tools": {
+    "required_tools": [
+      "document editor (md)",
+      "Suno prompt composer (text-based)",
+      "5-persona discussion simulator"
+    ],
+    "optional_tools": [
+      "RVC voice cloning tool (for ai_cloning vocal strategy)",
+      "Runway / Kling / similar AI MV generator",
+      "reference-track audio player"
+    ],
+    "fallback_tools": [
+      "manual lyrics drafting without persona simulation",
+      "text-only MV storyboard without AI preview"
+    ],
+    "tool_run_rules": [
+      "every AI-generated artifact records {tool_name, tool_version, prompt_file_version}",
+      "voice cloning uses only consented sources (e.g. PD 본인 녹음 파일)",
+      "persona discussions log all 5 opinions including dissent"
+    ],
+    "tool_output_policy": [
+      "AI artifacts include generation metadata as a file-top comment block",
+      "no emotional superlatives in PD-facing reports (좋다/완벽하다 등 지양)",
+      "audio/video binaries are stored under their stage folder with source-prompt neighbor file"
+    ]
+  },
+  "references": {
+    "required_references": [
+      "memory/project-overview.md",
+      "memory/project-status.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md"
+    ],
+    "optional_references": [
+      "참고곡/*",
+      "레퍼런스_MV/*",
+      "보이스_샘플/*"
+    ],
+    "discovery_rules": [
+      "session start: handoff.md → project-overview.md → project-status.md",
+      "when touching a stage, re-read that stage's most recent confirmed file"
+    ],
+    "comparison_rules": [
+      "new stage output compared against the immediately previous confirmed output",
+      "emotion-line drift flagged when current-stage tone diverges from 기획 확정 tone"
+    ],
+    "citation_rules": [
+      "Suno prompt changes cite prompt_vN filename",
+      "MV storyboard changes cite scene number and previous version path"
+    ]
+  },
+  "scoring": {
+    "dimensions": [
+      "emotion_line_coherence",
+      "vocal_feasibility",
+      "stage_coherence",
+      "persona_coverage",
+      "pd_intent_alignment"
+    ],
+    "weights": {
+      "emotion_line_coherence": 0.25,
+      "vocal_feasibility": 0.2,
+      "stage_coherence": 0.2,
+      "persona_coverage": 0.15,
+      "pd_intent_alignment": 0.2
+    },
+    "thresholds": {
+      "functional_pass": 0.8,
+      "human_pass": 0.75
+    },
+    "blocking_failures": [
+      "confirmed theme abandoned",
+      "vocal infeasible for PD",
+      "cross-stage file placement",
+      "consent-less voice cloning source used"
+    ],
+    "improvement_rules": [
+      "functional fail: list offending file paths + the rule they violated",
+      "human fail: cite persona + rubric grade + minimal-fix recommendation"
+    ]
+  },
+  "limits": {
+    "cycle_limits": {
+      "max_cycles": 5
+    },
+    "time_budget_rules": [
+      "single stage-deliverable budget: ~30-60 min wall-time equivalent",
+      "persona council per stage: ~20 min"
+    ],
+    "cost_budget_rules": [
+      "AI tool calls (Suno / MV generator) batched per prompt version, not per idea",
+      "voice cloning runs only after PD approves the target phrase"
+    ],
+    "parallelism_rules": [
+      "max 1 stage active at a time (serial pipeline by design)",
+      "within a stage: deliverable tasks may run sequentially, never in parallel AI tool calls"
+    ],
+    "auto_stop_rules": {
+      "stop_on_stagnation": true,
+      "stop_on_persistent_persona_dissent": true,
+      "stop_on_vocal_infeasibility": true
+    }
+  },
+  "recovery": {
+    "failure_classes": [
+      "stage_cross_contamination",
+      "vocal_infeasible",
+      "persona_disagreement",
+      "theme_drift",
+      "ai_tool_limitation"
+    ],
+    "retry_rules": [
+      "stage_cross_contamination: move the offending content back to its correct stage folder, don't rewrite",
+      "vocal_infeasible: regenerate only the high-risk phrase(s), keep rest verbatim",
+      "persona_disagreement: log dissent, let PD decide, do not auto-resolve",
+      "theme_drift: re-read 01_기획/concept.md and adjust the deviant artifact only"
+    ],
+    "fallback_routes": [
+      "Suno style miss: try with more specific reference track terms; if still failing → handoff(replan_pass)",
+      "RVC source insufficient: fall back to temporary AI cloning from a similar voice, flag for PD"
+    ],
+    "resume_rules": [
+      "partial stage outputs keep their {stage}/{name}_v{N}.md filename; resume from the earliest incomplete section",
+      "never rename or move an in-progress stage deliverable across sessions"
+    ],
+    "escalation_rules": [
+      "vocal infeasible on 2 consecutive attempts → handoff(approve_gate) for vocal strategy change",
+      "persona deadlock for 2 cycles → handoff(approve_gate) for PD override"
+    ]
+  },
+  "guardrails": {
+    "approval_required_actions": [
+      "changing confirmed genre / theme / language / AI tool selection",
+      "changing vocal_strategy (ai_cloning ↔ direct_record ↔ hybrid)",
+      "adding or removing a persona from the 5-persona roster",
+      "any modification under 06_최종/ before stages 01-05 confirmed",
+      "public release planning (release_plan.md) requires explicit PD ask"
+    ],
+    "forbidden_actions": [
+      "reverting a confirmed setting without a recorded meeting decision",
+      "cross-stage file placement (e.g. 작사 파일을 04_작곡/에 쓰기)",
+      "ignoring vocal feasibility annotations",
+      "voice cloning from a source the PD has not consented to",
+      "using emotional superlatives (좋다/완벽하다/훌륭하다) as the primary descriptor in reports",
+      "writing into 06_최종/ before all prior stages are confirmed"
+    ],
+    "scope_boundary_rules": [
+      "work only within 01_기획/ 02_페르소나/ 03_작사/ 04_작곡/ 05_뮤직비디오/ 06_최종/ and memory/",
+      "never edit unrelated user files elsewhere"
+    ],
+    "external_side_effect_rules": [
+      "no uploads to streaming/social platforms (YouTube, SoundCloud 등)",
+      "no distribution of voice-cloned audio outside the project folder",
+      "release plans and distribution steps require explicit PD approval"
+    ],
+    "audit_trace_rules": [
+      "every AI tool use records tool + version + prompt version + output filename",
+      "every stage transition is logged in project-status.md",
+      "every persona meeting's dissent opinions are preserved (not redacted)"
+    ]
+  }
+}

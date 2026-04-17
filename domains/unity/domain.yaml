@@ -1,0 +1,445 @@
+{
+  "meta": {
+    "domain_id": "unity",
+    "version": "0.2.0",
+    "display_name": "Unity Industrial Client",
+    "summary": "산업 자동화·디지털 트윈·팩토리 시뮬레이션용 Unity 클라이언트 개발 워크플로. URP/HDRP + Windows Standalone/WebGL + PLC/REST/WebSocket 연동 + 다국어 지원",
+    "default_mode": "retrofit",
+    "maturity": "calibrated"
+  },
+  "supports": {
+    "modes": ["greenfield", "retrofit", "resume"],
+    "project_types": [
+      "industrial_digital_twin",
+      "training_simulator",
+      "plc_integration_poc",
+      "factory_visualization",
+      "ar_industrial_app",
+      "editor_tooling"
+    ],
+    "platforms": ["windows_standalone", "webgl", "android_ar"],
+    "runtime_profiles": ["unity_editor", "headless_batchmode"],
+    "verification_profiles": ["compile_gate", "build_gate", "webgl_size_gate", "runtime_exception_gate"]
+  },
+  "intake": {
+    "required": [
+      "unity_version (LTS 권장, 예: 2022.3 LTS, 2021.3 LTS)",
+      "render_pipeline (URP | HDRP | BIRP)",
+      "target_platforms (windows_standalone / webgl / android_ar 중 1개 이상)",
+      "industry_domain (battery / shipbuilding / bio / pharma / general)"
+    ],
+    "optional": [
+      "plc_protocol (FOCAS / Modbus / Kepware / 없음)",
+      "target_fps",
+      "target_resolution",
+      "locales (ko, en, zh, ja, ... 기본 ko)",
+      "legacy_project_path (retrofit 모드에서 기존 프로젝트 경로)"
+    ],
+    "auto_detect": [
+      "ProjectSettings/ProjectVersion.txt",
+      "Packages/manifest.json",
+      "Assets/ 구조",
+      "*.sln / *.csproj 파일들",
+      "CLAUDE.md (기존 AI 작업 규칙)"
+    ],
+    "ask_when_missing": [
+      "If no unity_version: ask Unity LTS 버전",
+      "If no render_pipeline: ask URP (일반 산업) / HDRP (고품질) / BIRP (레거시)",
+      "If no target_platforms: ask windows standalone / webgl / 둘 다"
+    ],
+    "normalize_rules": [
+      "asset names PascalCase (MyScript.cs, MyScene.unity)",
+      "folder names PascalCase under Assets/",
+      "scene names: {Feature}_{Purpose}.unity (예: Factory_Main.unity)",
+      "locale keys snake_case, namespace 접두사 권장"
+    ]
+  },
+  "outputs": {
+    "primary": [
+      "Assets/Scripts/**/*.cs",
+      "Assets/Scenes/**/*.unity",
+      "Assets/Prefabs/**",
+      "Assets/Art/** (textures, materials, models)",
+      "Assets/Settings/** (ScriptableObject data)"
+    ],
+    "secondary": [
+      "ProjectSettings/**/*.asset",
+      "Packages/manifest.json",
+      "memory/handoff.md",
+      "README.md"
+    ],
+    "review_artifacts": [
+      "build_report.json (size, warnings, errors per platform)",
+      "editor_log_summary.txt (컴파일/임포트/런타임 로그)",
+      "webgl_size_breakdown.md (WebGL 빌드 시)",
+      "missing_reference_scan.json"
+    ],
+    "completion_signal": [
+      "Editor 재진입 시 Console Error 0",
+      "대상 모든 플랫폼 빌드 성공",
+      "핵심 씬 플레이 1회 이상 성공",
+      "WebGL 빌드 시 압축 크기 상한 이내 (기본 200MB)",
+      "신규 다국어 키 누락 0"
+    ]
+  },
+  "scaffold": {
+    "required_structure": [
+      "project-root.md",
+      "memory/handoff.md",
+      "memory/coding-rules.md",
+      "Assets/",
+      "Assets/Scripts/",
+      "Assets/Scenes/",
+      "Packages/",
+      "ProjectSettings/",
+      ".gitignore (Unity 공식 템플릿)"
+    ],
+    "optional_structure": [
+      "Assets/_Core/ (공용 유틸)",
+      "Assets/Features/ (기능별 모듈)",
+      "Assets/Settings/ (ScriptableObject)",
+      "Assets/Localization/",
+      "Tests/ (EditMode/PlayMode)",
+      "Builds/ (.gitignore 권장)"
+    ],
+    "seed_files": [
+      ".gitignore",
+      ".editorconfig",
+      "CLAUDE.md (AI agent 작업 규칙)",
+      "README.md"
+    ],
+    "preserve_rules": [
+      "ProjectSettings/ProjectVersion.txt: Unity 버전 변경은 반드시 사용자 승인",
+      "Packages/manifest.json: 패키지 추가/제거/버전 변경은 런타임 영향 큼, 명시적 변경 기록 필수",
+      "Library/, Temp/, obj/: 항상 .gitignore — 절대 커밋 금지",
+      "*.meta 파일: 에셋과 쌍으로 반드시 유지 (GUID 깨지면 참조 전체 손실)",
+      "기존 씬/프리팹: 구조 크게 바꾸기 전 백업 또는 새 파일로 분기"
+    ],
+    "bootstrap_steps": [
+      "1. Unity LTS 버전 확인/생성 + ProjectVersion.txt 기록",
+      "2. Render pipeline 선택 (URP 권장 — WebGL 호환 + 성능 균형)",
+      "3. 필수 패키지 추가: TextMeshPro, InputSystem, UniTask, Addressables, Localization",
+      "4. Assets/ 구조 시드 (_Core / Features / Settings / Scenes / Prefabs / Art)",
+      "5. .gitignore Unity 템플릿 적용 + README/CLAUDE.md 시드"
+    ]
+  },
+  "planning": {
+    "goal_split_rules": [
+      "feature 단위 분할: 1 feature = 1 폴더 (scripts + scene + prefabs + data)",
+      "빌드 파이프라인 이슈는 기능보다 먼저 (빌드 브레이커 우선)",
+      "플랫폼별 분기가 필요한 작업은 별도 task로"
+    ],
+    "task_unit_rules": [
+      "1 task = 1 feature 구현 OR 1 버그 수정 OR 1 빌드/패키지 설정 변경",
+      "task title은 feature 영역 + 의도 명시 (예: `PLC_Reader: Modbus 연결 로직 추가`)"
+    ],
+    "priority_rules": [
+      "빌드 브레이커 (컴파일 에러, Missing Script) > 런타임 Exception > 핵심 기능 > UI/UX 개선",
+      "WebGL 빌드 크기 초과는 hard 우선순위",
+      "다국어 키 누락은 soft 우선순위"
+    ],
+    "acceptance_rules": [
+      "프로젝트 컴파일 성공 (Editor + 대상 플랫폼)",
+      "Console Error/Exception 0",
+      "Missing Script / Missing Reference 0",
+      "목표 FPS 달성 (타겟 해상도 기준)",
+      "WebGL 빌드 크기 한도 이내"
+    ],
+    "replan_triggers": [
+      "Unity 버전 업그레이드 필요 판단",
+      "Render pipeline 변경 필요 판단 (URP ↔ HDRP)",
+      "패키지 호환성 이슈 (특히 WebGL 미지원 패키지)",
+      "PLC 프로토콜 스펙 변경",
+      "대상 플랫폼 추가/제거"
+    ]
+  },
+  "builder": {
+    "execution_rules": [
+      "MonoBehaviour 생명주기 명시적 사용: Awake(초기화) / OnEnable(이벤트 구독) / Start(의존성 해결) / OnDisable(구독 해제) / OnDestroy(정리)",
+      "ScriptableObject로 데이터와 로직 분리 (설정, 데이터 테이블, 이벤트 채널)",
+      "비동기: Unity Coroutine보다 UniTask 우선 (예외 처리/취소/WebGL 호환)",
+      "WebGL 호환 고려: System.IO.File 대신 PlayerPrefs/Application.persistentDataPath, 멀티스레드(Task.Run) 지양",
+      "URP/HDRP 분기는 Shader Graph 또는 #if UNITY_PIPELINE_URP 사용",
+      "다국어: 하드코딩 문자열 금지, Localization 패키지 LocalizedString 또는 외부 테이블",
+      "Addressables: 리소스 로딩은 Addressables.LoadAssetAsync 사용, Resources.Load 지양"
+    ],
+    "change_scope_rules": [
+      "새 feature는 Assets/Features/{FeatureName}/ 하위에 새 폴더",
+      "기존 public API 수정 시 호환성 주석 필수 (Obsolete 또는 breaking change 명시)",
+      "ProjectSettings/** 수정은 사유 주석 + 회고 필수",
+      "씬 병합 시 prefab instance override 관리 주의"
+    ],
+    "artifact_rules": [
+      "모든 에셋은 .meta 동반 (GUID 일관성)",
+      "Prefab Variant 사용으로 변경 최소화",
+      "Material/Shader는 URP/HDRP 각각 호환 확인",
+      "다국어 테이블에 신규 키 추가 시 모든 locale 채움 (빈 값 금지)"
+    ],
+    "self_check_rules": [
+      "Console Error / Exception 0 (Editor + Play 모드)",
+      "Missing Script 컴포넌트 0",
+      "Missing Reference 0 (Null Reference 잠재)",
+      "대상 타겟 플랫폼 Build Settings 포함 확인",
+      "다국어 키 누락 0",
+      "WebGL 비호환 API 사용 0 (File.WriteAll, Thread 등)"
+    ],
+    "handoff_back_rules": [
+      "렌더 파이프라인 호환 이슈 감지 → handoff(review_only) + 영향 씬/머티리얼 목록",
+      "실제 PLC 통신 검증 불가한 환경 → handoff(approve_gate) + mock 구현 범위 제안",
+      "Unity 버전 업그레이드 필요 판단 → handoff(approve_gate)"
+    ]
+  },
+  "verify_functional": {
+    "required_checks": [
+      "프로젝트 컴파일 성공 (.csproj 전체)",
+      "Console Error / Exception 카운트 = 0",
+      "Unity Test Runner EditMode/PlayMode 테스트 통과 (있는 경우)",
+      "Missing Reference / Missing Script 0",
+      "대상 플랫폼 Build 성공 (Windows Standalone / WebGL 등)",
+      "WebGL 빌드 시 압축 크기 한도 내",
+      "씬 플레이 시 핵심 기능 1회 이상 동작"
+    ],
+    "ground_truth_sources": [
+      "ProjectSettings/ProjectVersion.txt",
+      "Packages/manifest.json",
+      "editor.log (Library/Logs/ 또는 %LOCALAPPDATA%\\Unity\\Editor\\Editor.log)",
+      "build_report.json (Editor > BuildReport API로 생성)",
+      "Unity Test Runner 결과"
+    ],
+    "execution_steps": [
+      "1. Editor 재진입 후 Console 상태 스냅샷",
+      "2. `Unity -batchmode -nographics -executeMethod BuildScript.BuildAll -quit` 실행",
+      "3. build_report.json 파싱 (size / warnings / errors per platform)",
+      "4. 핵심 씬 PlayMode 실행 (headless 또는 스크립트로)"
+    ],
+    "pass_fail_rules": [
+      "hard fail: 컴파일 에러, Console Exception, 빌드 실패, Missing Script, 대상 플랫폼 빌드 실패",
+      "soft fail (needs_iteration): 경고 과다 (>20), FPS 미달, WebGL 크기 상한 초과, 다국어 키 누락"
+    ],
+    "evidence_required": [
+      "editor.log 인용 + 빌드 artifact 경로",
+      "실패 씬/스크립트 이름 + 라인",
+      "빌드 크기 breakdown (있다면)"
+    ]
+  },
+  "verify_human": {
+    "review_axes": [
+      "code_quality (C# 관용구, MonoBehaviour 사용 적절성, SOLID)",
+      "unity_best_practices (Addressables/ScriptableObject/UniTask 등)",
+      "render_visual_quality (URP/HDRP 시각적 품질)",
+      "platform_compatibility (WebGL/PC/Mobile 동작 체감)",
+      "industrial_domain_fit (PLC/MES/산업 맥락 정합성)",
+      "performance (체감 FPS, 로딩 시간, 메모리)",
+      "maintainability (다음 엔지니어가 이어받을 수 있는 구조)"
+    ],
+    "personas": [
+      "Unity Architect: 구조/아키텍처/MonoBehaviour 사용 적절성",
+      "Render Engineer: URP/HDRP 차이 이해, 쉐이더 품질, 라이팅",
+      "Platform Ops: WebGL/PC/Mobile 호환성, 빌드 크기",
+      "QA: 플레이 체감, UX 흐름, 예외 시나리오",
+      "Industrial Domain Expert: PLC/공정 데이터 매핑 정합성"
+    ],
+    "reference_comparison": [
+      "기존 유사 프로젝트 구조와 비교 (예: factorydt의 EPO 플러그인 패턴)",
+      "Unity 공식 샘플 / Asset Store 베스트 프랙티스 대비"
+    ],
+    "quality_rubric": [
+      "A: 모든 축 통과 + 기존 패턴과 일관 + 빌드 전 플랫폼 성공",
+      "B: 경미 개선 (경고/UX 디테일/다국어 일부)",
+      "C: 구조적 문제 또는 플랫폼 호환 이슈",
+      "reject: 빌드 실패, 산업 도메인 오해석, WebGL 비호환 치명"
+    ],
+    "approval_rules": [
+      "C 이하 → result=changes_made",
+      "빌드 실패 또는 치명 호환 이슈 → result=rejected",
+      "A + 5 persona 동의 → result=approved"
+    ]
+  },
+  "tools": {
+    "required_tools": [
+      "Unity Editor (LTS)",
+      "Visual Studio / JetBrains Rider",
+      "git"
+    ],
+    "optional_tools": [
+      "UniTask",
+      "DOTween",
+      "Addressables",
+      "TextMeshPro",
+      "InputSystem",
+      "Cinemachine",
+      "Localization",
+      "ParrelSync (멀티 Editor 인스턴스)"
+    ],
+    "fallback_tools": [
+      "Unity CLI headless build (-batchmode -nographics)",
+      "Unity Test Runner CLI",
+      "수동 Editor 빌드 (사용자 승인 후)"
+    ],
+    "tool_run_rules": [
+      "Unity 버전은 ProjectVersion.txt와 일치해야 함 — 불일치 시 사용자 확인 필수",
+      "패키지 버전은 manifest.json에 고정, lockfile 커밋",
+      "빌드는 -nographics 옵션으로 headless 가능 여부 확인"
+    ],
+    "tool_output_policy": [
+      "빌드 산출물은 Builds/ 아래, git 제외",
+      "editor.log은 review artifact로 복사",
+      "BuildReport는 JSON으로 덤프해 artifact 등록"
+    ]
+  },
+  "references": {
+    "required_references": [
+      "Assets/ 구조 가이드 (이 도메인 팩 scaffold 섹션)",
+      "memory/handoff.md",
+      "memory/coding-rules.md",
+      "ProjectSettings/ProjectVersion.txt",
+      "Packages/manifest.json"
+    ],
+    "optional_references": [
+      "기존 유사 프로젝트 (factorydt / rims_editor / MOPA_PC / LGTouchSamples 등)",
+      "Unity 공식 Manual + Scripting API",
+      "URP/HDRP 공식 문서",
+      "Addressables 공식 가이드"
+    ],
+    "discovery_rules": [
+      "세션 시작 시 ProjectVersion.txt → manifest.json → memory/handoff.md 순서로 읽음",
+      "새 feature 착수 시 유사 기존 feature 폴더 구조 먼저 참조",
+      "WebGL 작업 시 Unity WebGL 제약 문서 필수 참조"
+    ],
+    "comparison_rules": [
+      "새 스크립트는 기존 _Core/ 유틸과 중복 체크",
+      "씬 구조는 유사 씬의 prefab 계층과 비교"
+    ],
+    "citation_rules": [
+      "Unity API 인용 시 버전 명시 (2022.3 LTS API)",
+      "패키지 사용 시 manifest 버전 인용",
+      "외부 라이브러리는 라이선스 + 버전 기록"
+    ]
+  },
+  "scoring": {
+    "dimensions": [
+      "compile_health",
+      "runtime_stability",
+      "render_quality",
+      "platform_compatibility",
+      "industrial_domain_fit",
+      "performance"
+    ],
+    "weights": {
+      "compile_health": 0.25,
+      "runtime_stability": 0.2,
+      "render_quality": 0.15,
+      "platform_compatibility": 0.15,
+      "industrial_domain_fit": 0.15,
+      "performance": 0.1
+    },
+    "thresholds": {
+      "functional_pass": 0.85,
+      "human_pass": 0.75
+    },
+    "blocking_failures": [
+      "컴파일 에러",
+      "Build 실패 (대상 플랫폼)",
+      "Missing Script / Missing Reference",
+      "런타임 Null/Exception",
+      "WebGL 비호환 API 사용",
+      "Unity 버전 불일치"
+    ],
+    "improvement_rules": [
+      "functional fail: 실패 원인 + 파일:라인 + 대상 플랫폼 명시",
+      "human fail: 해당 persona + rubric 등급 + 최소 수정안"
+    ]
+  },
+  "limits": {
+    "cycle_limits": {
+      "max_cycles": 6
+    },
+    "time_budget_rules": [
+      "단일 feature 구현 task 1~2시간 이내",
+      "증분 빌드 5분 이내 (캐시 활용)",
+      "WebGL 풀 빌드는 핵심 체크포인트에만"
+    ],
+    "cost_budget_rules": [
+      "WebGL 빌드는 빈번 실행 자제 (15~30분 소요)",
+      "Asset 재import 대량 발생 시 재시도 제한"
+    ],
+    "parallelism_rules": [
+      "Unity Editor 단일 인스턴스 (멀티 인스턴스는 ParrelSync 사용 시에만)",
+      "동시 빌드 1개 (Library lock 충돌 방지)"
+    ],
+    "auto_stop_rules": {
+      "stop_on_stagnation": true,
+      "stop_on_same_compile_error_twice": true,
+      "stop_on_webgl_incompat_repeated": true
+    }
+  },
+  "recovery": {
+    "failure_classes": [
+      "compile_error",
+      "missing_asset_meta",
+      "unity_version_mismatch",
+      "package_conflict",
+      "platform_incompat",
+      "webgl_size_exceed",
+      "plc_comm_fail"
+    ],
+    "retry_rules": [
+      "compile_error: 해당 script만 수정, 전체 재작성 금지",
+      "missing_asset_meta: .meta 복구 또는 에셋 재import",
+      "unity_version_mismatch: ProjectVersion 복구 (사용자 승인 시에만 upgrade)",
+      "package_conflict: manifest lockfile 기준 복구",
+      "platform_incompat: #if UNITY_WEBGL / #if UNITY_STANDALONE 분기",
+      "webgl_size_exceed: Addressables로 에셋 분리 + 압축 설정 강화"
+    ],
+    "fallback_routes": [
+      "headless build 실패 → Editor 수동 빌드 (사용자 승인 후)",
+      "PLC 실환경 접근 불가 → mock adapter 패턴으로 진행",
+      "URP 특정 기능 미지원 → HDRP 분기 또는 custom shader"
+    ],
+    "resume_rules": [
+      "진행 중 씬 그대로 유지 (씬 상태 손실 방지)",
+      "Library/ 재import 허용 (캐시일 뿐, 재생성 가능)",
+      "빌드 진행 중 취소는 Builds/ 지우고 재시작"
+    ],
+    "escalation_rules": [
+      "동일 컴파일 에러 2회 연속 → handoff(approve_gate)",
+      "WebGL 크기 초과 2회 연속 → handoff(review_only) + Addressables 재설계",
+      "PLC 통신 재현 불가 지속 → handoff(replan_pass)"
+    ]
+  },
+  "guardrails": {
+    "approval_required_actions": [
+      "Unity Major/Minor 버전 변경 (예: 2021 → 2022)",
+      "Render pipeline 전환 (URP ↔ HDRP)",
+      "대상 플랫폼 추가/제거",
+      "ProjectSettings 대규모 변경 (Graphics/Quality/Player 대량 수정)",
+      "Packages/manifest.json에서 핵심 패키지 제거/교체",
+      "실제 공정 PLC에 쓰기 명령 전송"
+    ],
+    "forbidden_actions": [
+      "Library/ Temp/ obj/ 커밋",
+      ".meta 파일 누락한 에셋 이동/삭제",
+      "하드코딩된 다국어 문자열 (LocalizedString 우회)",
+      "Editor 전용 API를 런타임에 호출 (UnityEditor.* at runtime)",
+      "WebGL 타겟에서 System.IO.File 쓰기, Thread, Reflection 과다 사용",
+      "Resources/ 폴더 남용 (Addressables 대체)",
+      "실제 PLC에 무단 쓰기 명령 (읽기만 허용)"
+    ],
+    "scope_boundary_rules": [
+      "Assets/, Packages/, ProjectSettings/, memory/ 안에서만 작업",
+      "사용자의 다른 Unity 프로젝트 폴더는 참조만, 수정 금지",
+      "Builds/ 외부에 빌드 산출물 쓰기 금지"
+    ],
+    "external_side_effect_rules": [
+      "실 PLC/공정 설비에 쓰기 명령 금지 (읽기 전용 모니터링만)",
+      "외부 REST/WebSocket 서버로의 destructive 호출은 사용자 승인 필수",
+      "빌드 배포(고객사 납품, 스토어 업로드)는 사용자 승인 필수"
+    ],
+    "audit_trace_rules": [
+      "Unity 버전 변경은 CHANGELOG 또는 ProjectVersion.txt 히스토리에 남김",
+      "패키지 추가/제거는 manifest diff + 사유 주석",
+      "빌드 결과는 timestamp 태그 + 대상 플랫폼 기록",
+      "PLC 통신 로그는 감사용으로 보존"
+    ]
+  }
+}

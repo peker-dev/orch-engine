@@ -1,0 +1,395 @@
+{
+  "meta": {
+    "domain_id": "novel",
+    "version": "0.2.0",
+    "display_name": "Novel",
+    "summary": "현대 판타지 장편 웹소설 집필 워크플로 (페르소나 6인 회의 + 문장 위계 + Show-don't-tell 원칙 준수)",
+    "default_mode": "retrofit",
+    "maturity": "calibrated"
+  },
+  "supports": {
+    "modes": ["greenfield", "retrofit", "resume"],
+    "project_types": ["webnovel_long_form", "scenario", "short_fiction"],
+    "platforms": ["documents"],
+    "runtime_profiles": ["local_docs"],
+    "verification_profiles": ["persona_review_6", "style_gate"]
+  },
+  "intake": {
+    "required": [
+      "genre (e.g. 현대 판타지, 먼치킨, 로맨스판타지)",
+      "length_unit (e.g. 화 단위 / 권 단위)",
+      "viewpoint (1인칭 / 3인칭 / 혼합)",
+      "current_progress (어떤 화까지 완료되었는가)"
+    ],
+    "optional": [
+      "reference_authors",
+      "persona_roster (defaults to 6-persona council)",
+      "target_platform (kakaopage, naverseries, munpia 등)"
+    ],
+    "auto_detect": [
+      "원고/{N권}/{NN}화_{제목}.md patterns",
+      "설정/*.md (worldbuilding docs)",
+      "회의록/{YYYY-MM-DD}_{주제}.md",
+      "memory/writing-principles.md"
+    ],
+    "ask_when_missing": [
+      "If no genre: ask 현대 판타지 / 로맨스판타지 / 무협 / 기타",
+      "If no viewpoint: ask 1인칭 or 3인칭 (mixing needs explicit section per scene)"
+    ],
+    "normalize_rules": [
+      "episode numbers zero-padded to 2 digits (01화, 02화, ...)",
+      "chapter filenames: {NN}화_{제목}.md",
+      "meeting log filenames: {YYYY-MM-DD}_{주제}.md"
+    ]
+  },
+  "outputs": {
+    "primary": [
+      "원고/{N권}/{NN}화_{제목}.md (draft + revisions)",
+      "회의록/{YYYY-MM-DD}_{주제}.md",
+      "설정/*.md (world, abilities, characters, timelines)"
+    ],
+    "secondary": [
+      "memory/project-status.md (episode progress + confirmed changes)",
+      "memory/handoff.md (session close state)"
+    ],
+    "review_artifacts": [
+      "persona_review_notes.md (per-persona findings)",
+      "style_gate_result.json (sentence hierarchy + forbidden qualifier counts)"
+    ],
+    "completion_signal": [
+      "writing-principles.md checklist fully passed",
+      "persona council 6 all return `approved` or `changes_made` with minor notes only",
+      "project-status.md updated with new episode state"
+    ]
+  },
+  "scaffold": {
+    "required_structure": [
+      "project-root.md",
+      "memory/handoff.md",
+      "memory/writing-principles.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md",
+      "memory/project-status.md",
+      "원고/",
+      "설정/",
+      "회의록/",
+      "페르소나/"
+    ],
+    "optional_structure": [
+      "drafts/",
+      "archives/",
+      "참고/"
+    ],
+    "seed_files": [
+      "memory/writing-principles.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md"
+    ],
+    "preserve_rules": [
+      "confirmed 원고/*.md: never overwrite without user consent",
+      "confirmed 설정/*.md: change only after a recorded 회의록 decision",
+      "회의록/*.md: append-only; never retroactively edit past meetings",
+      "persona profiles under 페르소나/: treat as versioned — additions OK, overwrites require handoff"
+    ],
+    "bootstrap_steps": [
+      "1. confirm genre + viewpoint + target platform",
+      "2. seed 6-persona council under 페르소나/",
+      "3. generate MEMORY.md index pointing at writing-principles + workflow-rules",
+      "4. scaffold 설정/ with empty world/abilities/characters/timeline skeletons"
+    ]
+  },
+  "planning": {
+    "goal_split_rules": [
+      "1 planning unit = 1 화(episode) OR 1 설정 확정 회의 주제 OR 1 개정 pass",
+      "chapter arcs span multiple cycles — plan per-episode, not per-arc"
+    ],
+    "task_unit_rules": [
+      "1 task = 1 화 초고 OR 1 화 개정 OR 1 페르소나 회의록 OR 1 설정 문서 확정",
+      "task title must state the episode number + intent (e.g. `05화 각성 초고`, `03화 리듬 재조정`)"
+    ],
+    "priority_rules": [
+      "사용자 피드백 대기 중인 화가 있으면 그 화의 개정이 최우선",
+      "그 다음: 아웃라인 기반 다음 순차 화",
+      "설정 충돌 감지된 경우 회의록 개최가 집필보다 우선"
+    ],
+    "acceptance_rules": [
+      "writing-principles.md 전 항목 통과 (문장 위계, 1인 1행, 3행 문단, 감정어 금지, 강조기호 규약, Anti-Drama)",
+      "project-status.md에 해당 화 상태 갱신됨",
+      "세계관/능력/캐릭터 정합성이 설정/*.md와 일치"
+    ],
+    "replan_triggers": [
+      "사용자 피드백으로 플롯 방향 변경 지시",
+      "페르소나 회의에서 설정 변경 결정",
+      "긴장축(예: 서윤아 인연 고리) 배치 공백이 아웃라인 기준 3화 이상 벌어짐",
+      "사이다/고구마 배분이 배분 원칙과 어긋남"
+    ]
+  },
+  "builder": {
+    "execution_rules": [
+      "follow sentence hierarchy: 서사(15+ chars, connective endings) vs 임팩트(3-10 chars); one 임팩트 per 문단",
+      "1-sentence-per-line, max 3 lines per paragraph",
+      "no emotion adjectives (비참하다/슬프다/놀랍다 등) — show through action, sensory detail, object",
+      "use emphasis markers per convention: [ ] system msg, 『 』 status/skill, * * inner monologue",
+      "Anti-Drama: no abstract expressions (눈을 읽지 않았다 등); use concrete genre vocabulary",
+      "wrap worldbuilding into protagonist POV/action; never dump world info as a paragraph"
+    ],
+    "change_scope_rules": [
+      "new episodes: create a new file 원고/{N권}/{NN}화_{제목}.md — never overwrite a prior episode",
+      "episode revision: increment revision count in header, keep change log inside file",
+      "설정/*.md edits: only after a 회의록 decision exists; cite the meeting log filename",
+      "memory/*.md rules: append only; older rules remain for audit"
+    ],
+    "artifact_rules": [
+      "episode header must include: 화 번호 / 제목 / 확정 아웃라인 참조 / 개정 회차",
+      "link related 회의록 when reflecting a setting change",
+      "cite writing-principles line numbers when a stylistic choice is non-obvious"
+    ],
+    "self_check_rules": [
+      "run a sentence-hierarchy pass: ratio of 서사/임팩트 within target",
+      "grep for paragraph line counts > 3 → must be 0",
+      "grep for banned emotion adjectives → must be 0",
+      "grep for banned abstract phrasings → must be 0",
+      "confirm emphasis-marker usage matches convention",
+      "ensure no block-style world exposition (heuristic: setting description paragraphs >5 lines consecutive)"
+    ],
+    "handoff_back_rules": [
+      "plot direction requires change → handoff(replan_pass) with persona council required",
+      "setting conflict detected → handoff(review_only) citing the conflicting 설정 files",
+      "user feedback pending on prior episode → handoff(approve_gate)"
+    ]
+  },
+  "verify_functional": {
+    "required_checks": [
+      "paragraph format: no paragraph exceeds 3 lines",
+      "one-sentence-per-line rule: offending lines listed",
+      "banned emotion adjective count == 0 (block-list defined in writing-principles)",
+      "banned abstract expression count == 0",
+      "emphasis markers ([ ], 『 』, * *) used per convention only",
+      "episode header present with 화 번호 + 제목 + 개정 회차",
+      "worldbuilding dump heuristic: no 5+ consecutive setting-description lines"
+    ],
+    "ground_truth_sources": [
+      "memory/writing-principles.md (canonical style rules)",
+      "설정/*.md (world + abilities + characters)",
+      "아웃라인 문서 (confirmed beat map)",
+      "회의록/*.md (decisions that override defaults)"
+    ],
+    "execution_steps": [
+      "1. parse paragraph/sentence structure of the draft",
+      "2. grep block-list of forbidden qualifiers",
+      "3. cross-check character/ability names against 설정/",
+      "4. compare current-episode beats against outline"
+    ],
+    "pass_fail_rules": [
+      "hard fail: any banned-qualifier hit > 0",
+      "hard fail: any paragraph > 3 lines",
+      "hard fail: emphasis marker misuse",
+      "hard fail: character/ability name conflict with 설정/",
+      "soft fail (needs_iteration): 서사/임팩트 ratio skew, pacing-rhythm drift, tension-beat displacement"
+    ],
+    "evidence_required": [
+      "offending line number + quoted original text",
+      "conflicting setting file path + line reference",
+      "outline beat id that was missed or displaced"
+    ]
+  },
+  "verify_human": {
+    "review_axes": [
+      "readability (mobile-first rhythm)",
+      "사이다 타이밍 (catharsis placement vs outline)",
+      "character motive coherence",
+      "reader retention (exit-risk points)",
+      "market fit (platform trend alignment)",
+      "world consistency"
+    ],
+    "personas": [
+      "강서진(서사): tension-release curve, foreshadow placement",
+      "윤재혁(설정): worldbuilding consistency, ability-system logic",
+      "소이현(캐릭터): character motive + emotional-line naturalness",
+      "한도윤(독자시점): immersion, exit-risk points",
+      "박준영(편집장): length + composition + commercial balance",
+      "이도하(상업성): paywall hook, market trend fit, reader-drop points"
+    ],
+    "reference_comparison": [
+      "diff rhythm against the previous episode",
+      "pattern check against reference authors (김강현/산경/싱숑/추공/별도작가)",
+      "flag pacing shift >20% (line-count-per-beat) without outline change"
+    ],
+    "quality_rubric": [
+      "A: all six personas pass + rhythm + foreshadow + 사이다 aligned with outline",
+      "B: minor adjustment needed (one axis weak)",
+      "C: multiple axes weak, meaningful revision needed",
+      "reject: plot regression, world conflict, or banned-qualifier slip-through"
+    ],
+    "approval_rules": [
+      "C or below → result=changes_made with persona findings",
+      "plot regression or worldbuilding conflict → result=rejected",
+      "grade A with 6-persona consensus → result=approved",
+      "grade A with dissent from 1 persona but no hard blocker → result=approved with dissent noted"
+    ]
+  },
+  "tools": {
+    "required_tools": [
+      "document editor (md)",
+      "text grep (for block-list, paragraph checks)",
+      "persona-council simulation (6 personas, turn-based)"
+    ],
+    "optional_tools": [
+      "reference-author corpus lookup",
+      "market-trend feed",
+      "tts playback for rhythm check"
+    ],
+    "fallback_tools": [
+      "manual persona transcription in 회의록/",
+      "static outline diff"
+    ],
+    "tool_run_rules": [
+      "persona council: log every persona's opinion including rejections with reasoning",
+      "every style-gate grep records the block-list version used",
+      "outline-beat diff is recorded with beat id before/after"
+    ],
+    "tool_output_policy": [
+      "회의록 files are append-only; one file per meeting day",
+      "review artifacts are versioned by cycle index",
+      "quoted snippets in review must include line numbers"
+    ]
+  },
+  "references": {
+    "required_references": [
+      "memory/writing-principles.md",
+      "memory/workflow-rules.md",
+      "memory/coding-rules.md",
+      "memory/project-status.md",
+      "설정/*.md"
+    ],
+    "optional_references": [
+      "회의록/*.md",
+      "페르소나/*.md",
+      "reference-author notes"
+    ],
+    "discovery_rules": [
+      "session start: read memory/handoff.md → writing-principles.md → project-status.md in that order",
+      "when touching 설정, re-read that specific 설정 file before edits",
+      "when recomposing tension beats, re-read the latest 회의록 that decided the beat map"
+    ],
+    "comparison_rules": [
+      "new episode compared against the immediately prior episode for rhythm",
+      "setting changes compared against the last confirmed 설정 version",
+      "note rule evolution in memory/handoff.md at session close"
+    ],
+    "citation_rules": [
+      "inline citation for 설정 changes: 회의록 filename + date",
+      "inline citation for style rules: writing-principles.md section name"
+    ]
+  },
+  "scoring": {
+    "dimensions": [
+      "style_discipline",
+      "sentence_hierarchy_balance",
+      "pacing_rhythm",
+      "character_motive",
+      "world_consistency",
+      "reader_retention"
+    ],
+    "weights": {
+      "style_discipline": 0.2,
+      "sentence_hierarchy_balance": 0.2,
+      "pacing_rhythm": 0.2,
+      "character_motive": 0.15,
+      "world_consistency": 0.15,
+      "reader_retention": 0.1
+    },
+    "thresholds": {
+      "functional_pass": 0.85,
+      "human_pass": 0.75
+    },
+    "blocking_failures": [
+      "banned emotion adjective detected",
+      "paragraph > 3 lines",
+      "emphasis marker misuse",
+      "worldbuilding block dump",
+      "confirmed plot point regressed"
+    ],
+    "improvement_rules": [
+      "functional fail: surface offending line numbers + quoted text in findings",
+      "human fail: cite the persona and the rubric grade in findings; recommend the minimal fix"
+    ]
+  },
+  "limits": {
+    "cycle_limits": {
+      "max_cycles": 5
+    },
+    "time_budget_rules": [
+      "single-episode draft budget: ~30 min wall-time equivalent",
+      "episode revision budget: ~15 min",
+      "persona council meeting: ~20 min"
+    ],
+    "cost_budget_rules": [
+      "prefer grep-first verification over full LLM re-read",
+      "persona simulations limited to block-listed topics per cycle"
+    ],
+    "parallelism_rules": [
+      "max 1 episode being drafted concurrently (to preserve rhythm consistency)",
+      "persona council runs sequentially, not in parallel"
+    ],
+    "auto_stop_rules": {
+      "stop_on_stagnation": true,
+      "stop_on_persistent_persona_dissent": true
+    }
+  },
+  "recovery": {
+    "failure_classes": [
+      "style_violation",
+      "world_conflict",
+      "plot_regression",
+      "pacing_broken",
+      "persona_dissent_persistent"
+    ],
+    "retry_rules": [
+      "style_violation: rewrite only the offending lines (not the full episode)",
+      "world_conflict: re-read 설정 + 회의록, adjust episode minimally",
+      "plot_regression: diff against outline and restore the missed beat",
+      "pacing_broken: adjust sentence hierarchy ratio in the affected 문단 only"
+    ],
+    "fallback_routes": [
+      "if 2 personas persistently dissent → handoff(replan_pass) with explicit dissent notes",
+      "if world_conflict has no 설정 precedent → handoff(review_only) to request a decision"
+    ],
+    "resume_rules": [
+      "partial drafts keep their 화 filename; resume from the earliest incomplete section",
+      "never rename or move an in-progress episode across sessions"
+    ],
+    "escalation_rules": [
+      "style_violation 2 consecutive cycles on the same episode → handoff(approve_gate)",
+      "any plot regression proposal → handoff regardless of cycle count"
+    ]
+  },
+  "guardrails": {
+    "approval_required_actions": [
+      "changing a confirmed plot point",
+      "changing a confirmed character name or ability name",
+      "changing a confirmed tension-beat (e.g. 서윤아 만남 위치, 김태성 응징 화)",
+      "modifying memory/writing-principles.md or memory/workflow-rules.md"
+    ],
+    "forbidden_actions": [
+      "using banned emotion adjectives (비참하다/슬프다/놀랍다/좋았다 etc.) as primary descriptors",
+      "abstract phrasings like `눈을 읽지 않았다`, `생각하는 것 같은 눈`",
+      "worldbuilding dumps (block paragraphs of setting description)",
+      "overwriting prior episodes without a change log",
+      "ignoring a confirmed 회의록 rejection reason"
+    ],
+    "scope_boundary_rules": [
+      "work only within 원고/, 설정/, 회의록/, 페르소나/, memory/",
+      "never edit user-confidential files elsewhere"
+    ],
+    "external_side_effect_rules": [
+      "no direct upload to a publishing platform (kakaopage/naverseries/munpia)",
+      "no public posting without explicit user ask — draft and review only"
+    ],
+    "audit_trace_rules": [
+      "every setting change cites the 회의록 that approved it",
+      "every episode revision records a change log entry",
+      "project-status.md updated with each episode's state transition"
+    ]
+  }
+}

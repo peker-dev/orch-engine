@@ -1,0 +1,20 @@
+{
+  "schema_id": "SCHEMA-A1",
+  "fields": {
+    "meta": ["domain_id", "version", "display_name", "summary", "default_mode", "maturity"],
+    "supports": ["modes", "project_types", "platforms", "runtime_profiles", "verification_profiles"],
+    "intake": ["required", "optional", "auto_detect", "ask_when_missing", "normalize_rules"],
+    "outputs": ["primary", "secondary", "review_artifacts", "completion_signal"],
+    "scaffold": ["required_structure", "optional_structure", "seed_files", "preserve_rules", "bootstrap_steps"],
+    "planning": ["goal_split_rules", "task_unit_rules", "priority_rules", "acceptance_rules", "replan_triggers"],
+    "builder": ["execution_rules", "change_scope_rules", "artifact_rules", "self_check_rules", "handoff_back_rules"],
+    "verify_functional": ["required_checks", "ground_truth_sources", "execution_steps", "pass_fail_rules", "evidence_required"],
+    "verify_human": ["review_axes", "personas", "reference_comparison", "quality_rubric", "approval_rules"],
+    "tools": ["required_tools", "optional_tools", "fallback_tools", "tool_run_rules", "tool_output_policy"],
+    "references": ["required_references", "optional_references", "discovery_rules", "comparison_rules", "citation_rules"],
+    "scoring": ["dimensions", "weights", "thresholds", "blocking_failures", "improvement_rules"],
+    "limits": ["cycle_limits", "time_budget_rules", "cost_budget_rules", "parallelism_rules", "auto_stop_rules"],
+    "recovery": ["failure_classes", "retry_rules", "fallback_routes", "resume_rules", "escalation_rules"],
+    "guardrails": ["approval_required_actions", "forbidden_actions", "scope_boundary_rules", "external_side_effect_rules", "audit_trace_rules"]
+  }
+}

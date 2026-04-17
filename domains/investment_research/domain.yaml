@@ -1,0 +1,371 @@
+{
+  "meta": {
+    "domain_id": "investment_research",
+    "version": "0.2.0",
+    "display_name": "Investment Research",
+    "summary": "KR/US 주식시장 대상 인과·확률 기반 분석 리포트 생성 워크플로 (INTP Market Architect 페르소나 준수)",
+    "default_mode": "retrofit",
+    "maturity": "calibrated"
+  },
+  "supports": {
+    "modes": ["greenfield", "retrofit", "resume"],
+    "project_types": ["daily_market_report", "holdings_review", "thematic_research"],
+    "platforms": ["documents"],
+    "runtime_profiles": ["local_docs"],
+    "verification_profiles": ["logic_review", "pre_buy_checklist_gate"]
+  },
+  "intake": {
+    "required": [
+      "target_markets (e.g. KOSPI, KOSDAQ, NASDAQ, NYSE)",
+      "report_scope (daily_market | holdings | thematic)",
+      "report_date (YYYY-MM-DD)"
+    ],
+    "optional": [
+      "held_tickers",
+      "focus_themes",
+      "prior_reports_dir"
+    ],
+    "auto_detect": [
+      "{date}_시장분석리포트.md",
+      "{date}_보유종목분석.md",
+      "memory/MEMORY.md (rules index)"
+    ],
+    "ask_when_missing": [
+      "If no target_markets: ask KR-only / US-only / both",
+      "If report_scope unset: ask daily_market or holdings"
+    ],
+    "normalize_rules": [
+      "date -> YYYY-MM-DD",
+      "tickers -> uppercase for US, 6-digit for KR",
+      "source urls -> keep original, do not rewrite"
+    ]
+  },
+  "outputs": {
+    "primary": [
+      "{date}_시장분석리포트.md",
+      "{date}_보유종목분석.md"
+    ],
+    "secondary": [
+      "memory/handoff.md (updated with session close state)",
+      "memory/*.md (append-only updates when rules evolve)"
+    ],
+    "review_artifacts": [
+      "pre_buy_checklist_result.json (5 items pass/fail per recommendation)",
+      "signal_vs_noise_log.md (classification trail)"
+    ],
+    "completion_signal": [
+      "report contains all 6 sections of report-format.md",
+      "all buy recommendations pass pre-buy-checklist 5 items",
+      "confidence >=70% or explicit 관망"
+    ]
+  },
+  "scaffold": {
+    "required_structure": [
+      "project-root.md",
+      "memory/MEMORY.md",
+      "memory/investment-persona.md",
+      "memory/core-thinking-loop.md",
+      "memory/signal-filtering.md",
+      "memory/timeframe-strategy.md",
+      "memory/report-format.md",
+      "memory/pre-buy-checklist.md",
+      "memory/coding-rules.md",
+      "memory/handoff.md"
+    ],
+    "optional_structure": [
+      "archives/",
+      "drafts/",
+      "data/snapshots/"
+    ],
+    "seed_files": [
+      "memory/investment-persona.md",
+      "memory/core-thinking-loop.md",
+      "memory/signal-filtering.md",
+      "memory/timeframe-strategy.md",
+      "memory/report-format.md",
+      "memory/pre-buy-checklist.md"
+    ],
+    "preserve_rules": [
+      "existing memory/*.md: append-only, never overwrite",
+      "existing {date}_*.md: never edit past-dated reports, create new ones",
+      "personal trade data: never propagate outside the project folder"
+    ],
+    "bootstrap_steps": [
+      "1. confirm target_markets and persona variant",
+      "2. copy seed_files from domain pack into memory/",
+      "3. generate MEMORY.md index pointing at seed files",
+      "4. create today's report file with empty 6-section skeleton"
+    ]
+  },
+  "planning": {
+    "goal_split_rules": [
+      "split by report_scope: one planning unit per report type",
+      "for holdings review: one task per held ticker",
+      "for thematic: one task per theme hypothesis"
+    ],
+    "task_unit_rules": [
+      "1 task = 1 ticker OR 1 thematic hypothesis",
+      "task title must state the causal hypothesis in one sentence (A -> B -> C)"
+    ],
+    "priority_rules": [
+      "smart_money_divergence signals (13F delta vs price stagnation) first",
+      "tickers failing prior pre-buy-checklist second (re-test)",
+      "general watchlist last"
+    ],
+    "acceptance_rules": [
+      "every task's deliverable must traverse core-thinking-loop 5 steps",
+      "every task must declare confidence_pct and timeframe classification (단타/장투/관망)",
+      "buy-recommending tasks must attach pre-buy-checklist result"
+    ],
+    "replan_triggers": [
+      "new macro event invalidates causal chain",
+      "fresh 13F filing for a watched ticker",
+      "pre-buy-checklist fails on item #1 or #5 (causality or exit-condition)"
+    ]
+  },
+  "builder": {
+    "execution_rules": [
+      "follow core-thinking-loop 5 steps in strict order: pattern -> causal -> validation -> antithesis -> conclusion",
+      "apply signal-filtering before citing any web source (Signal only)",
+      "cross-check every signal with at least 2 independent sources",
+      "classify every idea as 단타 / 장투 / 관망 per timeframe-strategy.md"
+    ],
+    "change_scope_rules": [
+      "new reports: create new file {date}_*.md, never edit yesterday",
+      "memory/*.md: append sections only, never rewrite existing rules",
+      "data/snapshots/: immutable once written"
+    ],
+    "artifact_rules": [
+      "cite source url + retrieval timestamp for every non-obvious claim",
+      "distinguish Signal-tagged vs Noise-tagged sources in the log",
+      "include at least 3 antithesis counter-arguments per hypothesis"
+    ],
+    "self_check_rules": [
+      "report contains all 6 sections of report-format.md",
+      "5 thinking-loop steps visibly traceable",
+      "pre-buy-checklist 5 items annotated pass/fail with reason",
+      "no emotional qualifiers (좋다/유망/great) -> must use causal phrasing",
+      "any confidence < 70% downgraded to 관망"
+    ],
+    "handoff_back_rules": [
+      "confidence between 55-70% with actionable signal -> open verifier_human handoff in 'approve_gate' mode",
+      "data_insufficient after 2 retries -> handoff with mode=review_only attaching the gap log",
+      "portfolio rebalance proposal -> always handoff (never auto-approve)"
+    ]
+  },
+  "verify_functional": {
+    "required_checks": [
+      "6 section headers present and non-empty: 포착된 신호 / 인과관계 / 종목 분석 / 투자 분류 / 리스크 & 반례 / 최종 판단",
+      "causal chain expressed as 'A -> B -> C' at least once",
+      "antithesis contains >=3 distinct counter-arguments",
+      "every buy recommendation has explicit exit condition + expected value math",
+      "confidence_pct present; if <70 then decision must be 관망"
+    ],
+    "ground_truth_sources": [
+      "DART (https://dart.fss.or.kr)",
+      "SEC EDGAR (https://www.sec.gov/edgar)",
+      "13F filings",
+      "official earnings releases",
+      "regulator macro announcements"
+    ],
+    "execution_steps": [
+      "1. parse report headings against report-format.md",
+      "2. grep for emotional qualifiers (blocklist) -> must be 0",
+      "3. count independent source urls per signal (>=2)",
+      "4. validate pre-buy-checklist result file fields"
+    ],
+    "pass_fail_rules": [
+      "hard fail if any of the 6 sections is missing or empty",
+      "hard fail if any buy recommendation lacks exit condition",
+      "hard fail if emotional qualifier blocklist >0",
+      "soft fail (needs_iteration) if antithesis <3 or source_count <2"
+    ],
+    "evidence_required": [
+      "quoted source snippet + url + retrieval_ts per signal",
+      "data snapshot path under data/snapshots/ when numeric claims are made"
+    ]
+  },
+  "verify_human": {
+    "review_axes": [
+      "causal_explainability",
+      "bias_avoidance",
+      "antithesis_quality",
+      "risk_disclosure_sufficiency",
+      "timeframe_classification_fit"
+    ],
+    "personas": [
+      "INTP Market Architect (memory/investment-persona.md) — skeptical, causal-first, emotion-free"
+    ],
+    "reference_comparison": [
+      "diff against the most recent prior report on the same ticker/theme",
+      "flag when confidence_pct moved >15pp without new causal evidence"
+    ],
+    "quality_rubric": [
+      "A: survives 3+ counter-arguments, independent sources, clear exit, expected value positive",
+      "B: above but one soft weakness (e.g. single-source numeric claim)",
+      "C: causal chain partial or antithesis shallow",
+      "reject: emotional phrasing, missing exit, unverifiable claims"
+    ],
+    "approval_rules": [
+      "C or below -> return result=changes_made with findings",
+      "any emotional qualifier -> result=rejected",
+      "portfolio rebalance without explicit user ask -> result=blocked",
+      "grade A with 70%+ confidence -> result=approved"
+    ]
+  },
+  "tools": {
+    "required_tools": [
+      "web_search (news, filings, price actions)",
+      "document editor (md)"
+    ],
+    "optional_tools": [
+      "13F scraper",
+      "financial statement api",
+      "price history api"
+    ],
+    "fallback_tools": [
+      "manual browser search with screenshot log",
+      "cached prior snapshot under data/snapshots/"
+    ],
+    "tool_run_rules": [
+      "every external lookup logged with {query, ts, top_sources}",
+      "cross-source rule: 2+ independent domains before marking Signal",
+      "never store API keys inside project folder"
+    ],
+    "tool_output_policy": [
+      "preserve original source url and publish date",
+      "never paraphrase numeric data; quote with units",
+      "retrieval timestamp must be recorded in Korea time (KST)"
+    ]
+  },
+  "references": {
+    "required_references": [
+      "memory/investment-persona.md",
+      "memory/core-thinking-loop.md",
+      "memory/signal-filtering.md",
+      "memory/timeframe-strategy.md",
+      "memory/report-format.md",
+      "memory/pre-buy-checklist.md",
+      "memory/coding-rules.md"
+    ],
+    "optional_references": [
+      "archived prior reports in project root (e.g. 2026-04-*_*.md)",
+      "memory/handoff.md for in-flight context"
+    ],
+    "discovery_rules": [
+      "session start: read memory/MEMORY.md first, then the required list",
+      "when touching a rule area, re-read the specific memory/*.md before edits"
+    ],
+    "comparison_rules": [
+      "compare hypothesis drift against the latest prior report on the same subject",
+      "note rule evolution in memory/handoff.md"
+    ],
+    "citation_rules": [
+      "every non-obvious external fact needs inline citation with url",
+      "internal rule references use the file path under memory/"
+    ]
+  },
+  "scoring": {
+    "dimensions": [
+      "causal_coherence",
+      "signal_vs_noise_purity",
+      "anti_bias_discipline",
+      "risk_framing_completeness",
+      "expected_value_clarity"
+    ],
+    "weights": {
+      "causal_coherence": 0.3,
+      "signal_vs_noise_purity": 0.2,
+      "anti_bias_discipline": 0.2,
+      "risk_framing_completeness": 0.15,
+      "expected_value_clarity": 0.15
+    },
+    "thresholds": {
+      "functional_pass": 0.8,
+      "human_pass": 0.75
+    },
+    "blocking_failures": [
+      "emotional qualifier detected",
+      "exit condition missing on buy recommendation",
+      "antithesis count <3",
+      "independent source count <2 on any headline signal"
+    ],
+    "improvement_rules": [
+      "on functional fail: surface the failed check name in findings for planner",
+      "on human fail: cite the quality_rubric grade and the offending sentence"
+    ]
+  },
+  "limits": {
+    "cycle_limits": {
+      "max_cycles": 4
+    },
+    "time_budget_rules": [
+      "research per report capped at ~30 min wall-time equivalent",
+      "per-ticker deep-dive capped at ~10 min"
+    ],
+    "cost_budget_rules": [
+      "external API calls minimized; prefer cached snapshot when <24h old"
+    ],
+    "parallelism_rules": [
+      "max 3 tickers analyzed concurrently to keep causal focus"
+    ],
+    "auto_stop_rules": {
+      "stop_on_stagnation": true,
+      "stop_on_repeated_checklist_fail": true
+    }
+  },
+  "recovery": {
+    "failure_classes": [
+      "data_insufficient",
+      "source_conflict",
+      "checklist_fail",
+      "emotional_qualifier_detected",
+      "confidence_underflow (<70%)"
+    ],
+    "retry_rules": [
+      "data_insufficient: one web re-search, then mark as '불확실' in report",
+      "source_conflict: fetch a 3rd independent source to tie-break",
+      "checklist_fail on item 1 or 5: replan task with new hypothesis",
+      "emotional_qualifier_detected: builder must rewrite offending sentences before next verifier pass"
+    ],
+    "fallback_routes": [
+      "if web_search degraded: fall back to manual browser log + mark evidence_degraded=true",
+      "if 13F unreachable: skip smart_money_divergence signal, note omission"
+    ],
+    "resume_rules": [
+      "partial reports keep their {date}_*.md filename and resume from the earliest missing section",
+      "do not rename or move in-progress reports across sessions"
+    ],
+    "escalation_rules": [
+      "two consecutive checklist_fail on the same ticker -> human handoff (approve_gate)",
+      "any portfolio rebalance proposal -> human handoff regardless of cycle count"
+    ]
+  },
+  "guardrails": {
+    "approval_required_actions": [
+      "actual buy/sell recommendations with sizing",
+      "portfolio rebalance proposals",
+      "changes to memory/investment-persona.md or core-thinking-loop.md"
+    ],
+    "forbidden_actions": [
+      "executing real brokerage orders",
+      "using emotional qualifiers (좋다/유망/great/promising) as the primary reason",
+      "raising confidence_pct without new causal evidence",
+      "skipping any of the pre-buy-checklist 5 items",
+      "sharing personal account balances outside the project folder"
+    ],
+    "scope_boundary_rules": [
+      "stay within memory/ and {date}_*.md outputs; never touch unrelated user files",
+      "never edit past-dated reports"
+    ],
+    "external_side_effect_rules": [
+      "analysis and recommendations only; never place real orders",
+      "no external posting (social media, blogs) without explicit user ask"
+    ],
+    "audit_trace_rules": [
+      "every conclusion carries source links + retrieval timestamps",
+      "every confidence_pct change is logged with the triggering evidence",
+      "cycle events.jsonl captures which signals were classified Signal vs Noise"
+    ]
+  }
+}

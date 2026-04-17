@@ -1,0 +1,24 @@
+{
+  "defaults": {
+    "scoring": {
+      "thresholds": {
+        "functional_pass": 0.7,
+        "human_pass": 0.7
+      }
+    },
+    "limits": {
+      "cycle_limits": {
+        "max_cycles": 6
+      },
+      "auto_stop_rules": {
+        "stop_on_stagnation": true
+      }
+    },
+    "guardrails": {
+      "forbidden_actions": [
+        "destructive_delete",
+        "external_side_effect_without_approval"
+      ]
+    }
+  }
+}
