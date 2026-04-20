@@ -1,0 +1,6 @@
+{
+  "domain": "unity",
+  "label": "fail",
+  "expected_violations": ["missing_script_reference"],
+  "note": "Broken.prefab has m_Script: {fileID: 0} — classic Missing Script sentinel"
+}

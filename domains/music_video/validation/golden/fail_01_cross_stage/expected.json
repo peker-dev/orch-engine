@@ -1,0 +1,6 @@
+{
+  "domain": "music_video",
+  "label": "fail",
+  "expected_violations": ["cross_stage_file_placement"],
+  "note": "suno_prompt_v1.md belongs in 04_작곡/ but is placed under 03_작사/"
+}

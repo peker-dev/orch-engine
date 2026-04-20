@@ -1,0 +1,6 @@
+{
+  "domain": "unity",
+  "label": "pass",
+  "expected_violations": [],
+  "note": "ProjectVersion present, no WebGL-banned API, prefab references a valid script guid"
+}

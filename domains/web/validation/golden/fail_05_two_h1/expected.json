@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "expected_violations": ["h1_count_invalid"],
+  "note": "page has two <h1> tags, violating 'exactly one h1 per page'"
+}

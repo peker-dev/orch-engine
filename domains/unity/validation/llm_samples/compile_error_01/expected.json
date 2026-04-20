@@ -1,0 +1,8 @@
+{
+  "domain": "unity",
+  "label": "fail",
+  "rubric_focus": "compile_health",
+  "expected_keywords": ["compile", "error"],
+  "expected_score_range": [0.0, 0.4],
+  "notes": "C# 파일에 명백한 문법 오류. Unity batchmode 컴파일 실패 재현 기대. scoring.blocking_failures.compile_error 연결."
+}

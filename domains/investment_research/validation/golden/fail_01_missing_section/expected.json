@@ -1,0 +1,6 @@
+{
+  "domain": "investment_research",
+  "label": "fail",
+  "expected_violations": ["missing_report_section"],
+  "note": "'리스크 & 반례' section is absent"
+}

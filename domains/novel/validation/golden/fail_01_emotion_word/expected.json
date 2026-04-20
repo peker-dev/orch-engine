@@ -1,0 +1,6 @@
+{
+  "domain": "novel",
+  "label": "fail",
+  "expected_violations": ["banned_emotion_adjective"],
+  "note": "contains '슬펐다' — violates show-don't-tell"
+}

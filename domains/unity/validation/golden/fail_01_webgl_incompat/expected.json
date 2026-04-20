@@ -1,0 +1,6 @@
+{
+  "domain": "unity",
+  "label": "fail",
+  "expected_violations": ["webgl_incompat_api"],
+  "note": "Assets/Scripts/BadIO.cs calls File.WriteAllText (banned for WebGL target)"
+}

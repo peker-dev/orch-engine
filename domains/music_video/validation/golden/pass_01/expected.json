@@ -1,0 +1,6 @@
+{
+  "domain": "music_video",
+  "label": "pass",
+  "expected_violations": [],
+  "note": "6단계 폴더 파이프라인 정상. 파일 배치 정합, 5 페르소나 모두 회의록 등장, 장르 일관."
+}

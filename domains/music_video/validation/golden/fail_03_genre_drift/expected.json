@@ -1,0 +1,6 @@
+{
+  "domain": "music_video",
+  "label": "fail",
+  "expected_violations": ["confirmed_setting_drift"],
+  "note": "memory/project-overview.md declares 발라드 but 04_작곡/suno_prompt_v1.md declares 록"
+}

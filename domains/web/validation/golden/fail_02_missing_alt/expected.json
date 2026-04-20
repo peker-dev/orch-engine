@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "expected_violations": ["img_alt_missing"],
+  "note": "identical to pass_01 but <img> has no alt attribute"
+}

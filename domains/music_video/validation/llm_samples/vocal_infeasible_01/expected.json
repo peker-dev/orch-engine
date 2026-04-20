@@ -1,0 +1,8 @@
+{
+  "domain": "music_video",
+  "label": "fail",
+  "rubric_focus": "vocal_feasibility",
+  "expected_keywords": ["음역", "vocal"],
+  "expected_score_range": [0.0, 0.55],
+  "notes": "PD 음역 대비 과도한 고음 지속. LLM verifier가 vocal_infeasible 로 판단하길 기대."
+}

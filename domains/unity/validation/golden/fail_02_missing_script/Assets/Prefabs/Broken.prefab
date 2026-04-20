@@ -1,0 +1,14 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1000000000
+GameObject:
+  m_ObjectHideFlags: 0
+  m_Name: Broken
+  m_IsActive: 1
+--- !u!114 &2000000000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_GameObject: {fileID: 1000000000}
+  m_Enabled: 1
+  m_Script: {fileID: 0}
+  m_Name:

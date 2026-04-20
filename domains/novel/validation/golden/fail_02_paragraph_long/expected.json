@@ -1,0 +1,6 @@
+{
+  "domain": "novel",
+  "label": "fail",
+  "expected_violations": ["paragraph_too_long"],
+  "note": "second paragraph has 4 non-blank lines (rule: max 3)"
+}

@@ -1,0 +1,6 @@
+{
+  "domain": "music_video",
+  "label": "fail",
+  "expected_violations": ["persona_coverage_missing"],
+  "note": "meeting log lacks one of the 5 personas (민수 missing)"
+}

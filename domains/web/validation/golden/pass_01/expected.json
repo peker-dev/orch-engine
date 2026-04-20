@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "pass",
+  "expected_violations": [],
+  "note": "minimal valid page: viewport + lang + single h1 + img alt + responsive evidence"
+}

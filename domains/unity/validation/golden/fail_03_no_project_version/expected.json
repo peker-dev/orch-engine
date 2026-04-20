@@ -1,0 +1,6 @@
+{
+  "domain": "unity",
+  "label": "fail",
+  "expected_violations": ["project_version_missing"],
+  "note": "ProjectSettings/ProjectVersion.txt is absent — not a valid Unity project root"
+}

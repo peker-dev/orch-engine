@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "expected_violations": ["responsive_evidence_missing"],
+  "note": "fixed px only: no @media / max-width / %/rem/em units. <meta viewport> alone does not count."
+}

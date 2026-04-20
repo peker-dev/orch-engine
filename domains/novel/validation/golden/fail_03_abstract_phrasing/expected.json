@@ -1,0 +1,6 @@
+{
+  "domain": "novel",
+  "label": "fail",
+  "expected_violations": ["abstract_phrasing"],
+  "note": "uses banned abstract phrasing '눈을 읽지 않았다'"
+}

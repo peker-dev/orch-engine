@@ -1,0 +1,8 @@
+{
+  "domain": "novel",
+  "label": "fail",
+  "rubric_focus": "world_consistency",
+  "expected_keywords": ["최서준", "사망"],
+  "expected_score_range": [0.0, 0.5],
+  "notes": "이전 화에서 죽은 인물이 다음 화에 그대로 등장·대사. blocking_failures.confirmed_plot_point_regressed 재현 기대."
+}

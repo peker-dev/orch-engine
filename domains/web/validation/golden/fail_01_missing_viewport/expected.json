@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "expected_violations": ["viewport_missing"],
+  "note": "identical to pass_01 but without <meta name=viewport>"
+}

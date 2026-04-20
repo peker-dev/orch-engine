@@ -1,0 +1,8 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "rubric_focus": "lighthouse_performance",
+  "expected_keywords": ["performance", "blocking"],
+  "expected_score_range": [0.0, 0.6],
+  "notes": "Render-blocking scripts + un-optimized large images. Lighthouse performance 점수가 낮아야 한다고 verifier가 판단하길 기대."
+}

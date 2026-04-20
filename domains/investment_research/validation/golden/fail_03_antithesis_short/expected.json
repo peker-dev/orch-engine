@@ -1,0 +1,6 @@
+{
+  "domain": "investment_research",
+  "label": "fail",
+  "expected_violations": ["antithesis_insufficient"],
+  "note": "only 2 antithesis bullets (rule requires >=3)"
+}

@@ -1,0 +1,6 @@
+{
+  "domain": "investment_research",
+  "label": "fail",
+  "expected_violations": ["sources_insufficient"],
+  "note": "zero URLs in the report — rule requires >=2 independent sources"
+}

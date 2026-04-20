@@ -1,0 +1,6 @@
+{
+  "domain": "web",
+  "label": "fail",
+  "expected_violations": ["lang_missing"],
+  "note": "identical to pass_01 but <html> tag has no lang attribute"
+}

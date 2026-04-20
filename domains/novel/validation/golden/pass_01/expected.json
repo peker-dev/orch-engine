@@ -1,0 +1,6 @@
+{
+  "domain": "novel",
+  "label": "pass",
+  "expected_violations": [],
+  "note": "each paragraph within 3-line cap, no banned emotion adjectives, no abstract phrasings"
+}
