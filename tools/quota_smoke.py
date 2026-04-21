@@ -265,6 +265,10 @@ def main() -> int:
     args = parser.parse_args()
 
     original_build_adapter = app._build_adapter
+    # Keep originals so main()'s finally can restore usage_wait monkey-patches
+    # even if a scenario exits abnormally before its own finally runs.
+    original_attempt_probe = usage_wait._attempt_probe
+    original_sleep = usage_wait.time.sleep
     wanted = [name.strip() for name in args.only.split(",") if name.strip()] or list(SCENARIOS)
     unknown = [name for name in wanted if name not in SCENARIOS]
     if unknown:
@@ -286,6 +290,13 @@ def main() -> int:
             print(f"[{status}] {name}: {result.message}")
             app._build_adapter = original_build_adapter  # type: ignore[assignment]
     finally:
+        # Belt-and-suspenders: restore every monkey-patch even on abrupt exit
+        # (scenario raising SystemExit, caller importing main() programmatically,
+        # etc.). Each scenario already restores these in its own finally, but
+        # nesting guarantees the invariant at the module boundary.
+        app._build_adapter = original_build_adapter  # type: ignore[assignment]
+        usage_wait._attempt_probe = original_attempt_probe  # type: ignore[assignment]
+        usage_wait.time.sleep = original_sleep  # type: ignore[assignment]
         if not args.keep_temp:
             shutil.rmtree(sandbox, ignore_errors=True)
 
