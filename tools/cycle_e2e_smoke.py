@@ -47,7 +47,12 @@ except AttributeError:
     pass
 
 import core.app as app
-from adapters.base import BaseAdapter, Invocation, InvocationResult
+from adapters.base import (
+    AdapterQuotaExceededError,
+    BaseAdapter,
+    Invocation,
+    InvocationResult,
+)
 
 
 # ----------------------------------------------------------------------
@@ -75,6 +80,14 @@ class ScriptedAdapter(BaseAdapter):
         self.invocations.append(invocation)
         cycle_index = int(invocation.context.get("cycle", 1)) if invocation.context else 1
         entry = self.plan[min(cycle_index - 1, len(self.plan) - 1)]
+        # Optional quota-failure hook: when the plan entry marks a role for
+        # quota failure, raise AdapterQuotaExceededError exactly as a real
+        # adapter would when the provider rejects with a rate-limit marker.
+        quota_fail_roles = entry.get("quota_fail_roles")
+        if isinstance(quota_fail_roles, (list, set, tuple)) and self.role in quota_fail_roles:
+            raise AdapterQuotaExceededError(
+                f"scripted quota: {self.role} hit rate limit on cycle {cycle_index}"
+            )
         if self.role == "planner":
             return InvocationResult(
                 status="ok",
