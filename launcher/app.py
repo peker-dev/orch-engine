@@ -385,6 +385,69 @@ def _run_core(args: list[str]) -> int:
     return subprocess.run(command, cwd=str(ENGINE_ROOT), check=False).returncode
 
 
+def _run_tool(module: str, args: list[str]) -> int:
+    """Invoke a `tools.<module>` CLI with the engine root as cwd.
+
+    Shared helper for the management menu entries that surface read-only
+    diagnostics (usage_probe) and blocking-but-interruptible loops
+    (usage_wait). Mirrors `_run_core` so the command echo is consistent.
+    """
+    command = [sys.executable, "-m", f"tools.{module}", *args]
+    print()
+    print("실행: " + " ".join(_quote_arg(arg) for arg in command), flush=True)
+    return subprocess.run(command, cwd=str(ENGINE_ROOT), check=False).returncode
+
+
+def _run_usage_probe(target_root: Path) -> None:
+    """Print orch-engine's own rolling-window adapter usage.
+
+    Self-usage only — the tool cannot see Claude/Codex sessions outside
+    orch-engine. See `memory/usage-probe-research.md` for why no official
+    quota API exists yet.
+    """
+    rc = _run_tool("usage_probe", ["--target", str(target_root)])
+    if rc != 0:
+        print(f"usage_probe 반환 코드={rc}.")
+
+
+def _run_usage_wait(target_root: Path) -> None:
+    """Block until the provider's quota refills, then return to the menu.
+
+    Wraps `tools.usage_wait` with interactive prompts for the poll interval
+    and maximum wait. Ctrl+C in the child process exits with rc=4 and the
+    menu resumes.
+    """
+    poll_text = _prompt_text("프로브 간격 (초, 최소 30)", default="300")
+    max_text = _prompt_text("최대 대기 시간 (시간)", default="6")
+    try:
+        poll = max(30, int(poll_text))
+        hours = max(0.1, float(max_text))
+    except ValueError:
+        print("숫자를 파싱할 수 없어 기본값(300초 / 6시간)으로 진행합니다.")
+        poll = 300
+        hours = 6.0
+    rc = _run_tool(
+        "usage_wait",
+        [
+            "--target",
+            str(target_root),
+            "--poll-interval-sec",
+            str(poll),
+            "--max-hours",
+            str(hours),
+        ],
+    )
+    print()
+    if rc == 0:
+        print("quota 회복 감지. `사이클 1회 실행`을 다시 시도할 수 있습니다.")
+    elif rc == 3:
+        print("최대 대기 시간을 초과했습니다. 수동으로 재시도하세요.")
+    elif rc == 4:
+        print("사용자가 취소했습니다.")
+    else:
+        print(f"usage_wait 반환 코드={rc}.")
+
+
 def _run_core_in_new_console(args: list[str]) -> subprocess.Popen | None:
     """Spawn `core.app` in a separate console window on Windows and keep the
     launcher menu interactive. Returns the `Popen` handle so the caller can
@@ -460,7 +523,9 @@ def _manage_menu(target_root: Path) -> int:
                 ("4", "handoff 응답 수용 (ingest)"),
                 ("5", "활성 handoff 취소"),
                 ("6", "목표 요약 갱신"),
-                ("7", "종료"),
+                ("7", "사용량 보기 (usage probe)"),
+                ("8", "quota 회복 대기 (usage wait)"),
+                ("9", "종료"),
             ],
             default="1",
         )
@@ -522,6 +587,10 @@ def _manage_menu(target_root: Path) -> int:
             _update_existing_goal(target_root, updated_goal)
             print("목표 요약이 갱신되었습니다.")
         elif choice == "7":
+            _run_usage_probe(target_root)
+        elif choice == "8":
+            _run_usage_wait(target_root)
+        elif choice == "9":
             if detached_child is not None and detached_child.poll() is None:
                 print(
                     f"안내: 분리된 사이클이 아직 실행 중입니다 (pid={detached_child.pid}). "

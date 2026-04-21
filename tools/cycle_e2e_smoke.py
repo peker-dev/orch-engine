@@ -15,8 +15,10 @@ match the configured policy.
 Scenarios:
     - complete_on_first_cycle      : high scores -> completed
     - max_cycles_reached           : low scores + max_cycles=2 -> blocked
-    - stagnation_detected          : two flat needs_iteration cycles ->
-                                     blocked by stagnation policy
+    - stagnation_detected          : four needs_iteration cycles with three
+                                     consecutive regressions -> blocked by
+                                     stagnation policy (2026-04-21 relaxed
+                                     threshold)
     - handoff_mode_pauses_cycle    : workflow.human_review_mode=handoff ->
                                      cycle pauses at verifier_functional ->
                                      handoff_active, then handoff-ingest
@@ -356,16 +358,19 @@ def _scenario_max_cycles_reached(sandbox: Path) -> ScenarioResult:
 def _scenario_stagnation_detected(sandbox: Path) -> ScenarioResult:
     target = sandbox / "stagnation"
     _init_project(target, limits_override={"max_cycles": 10, "stop_on_stagnation": True})
-    # Two consecutive cycles with identical (non-improving) scores and
-    # needs_iteration -> stagnation_detected should fire on cycle 2.
+    # 2026-04-21 relaxed threshold: stagnation requires three consecutive
+    # regressions. Here cycles 2→3→4 each regress on both scores, so cycle 4
+    # should trip `stagnation_detected` / state=blocked.
     _install_scripted_adapters(
         [
-            {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
-            {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
+            {"functional": 0.9, "human": 0.9, "result": "needs_iteration"},
+            {"functional": 0.7, "human": 0.7, "result": "needs_iteration"},
+            {"functional": 0.5, "human": 0.5, "result": "needs_iteration"},
+            {"functional": 0.3, "human": 0.3, "result": "needs_iteration"},
         ]
     )
-    _run_cycle(target)  # cycle 1
-    _run_cycle(target)  # cycle 2 -> stagnation
+    for _ in range(4):
+        _run_cycle(target)
     session = _read_session(target)
     if session.get("state") != "blocked":
         return ScenarioResult(
@@ -379,7 +384,11 @@ def _scenario_stagnation_detected(sandbox: Path) -> ScenarioResult:
             False,
             f"last_decision={session.get('last_decision')} != stagnation_detected",
         )
-    return ScenarioResult("stagnation_detected", True, "stagnation policy stopped the loop")
+    return ScenarioResult(
+        "stagnation_detected",
+        True,
+        "three-regression streak stopped the loop (cycles 2→3→4 each regressed)",
+    )
 
 
 def _scenario_handoff_mode_pauses_cycle(sandbox: Path) -> ScenarioResult:

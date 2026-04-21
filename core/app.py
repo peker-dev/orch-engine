@@ -1263,27 +1263,46 @@ def _is_stagnating(
     score_history: list[dict[str, object]],
     current_functional: float,
     current_human: float,
+    min_consecutive_regressions: int = 3,
 ) -> bool:
-    """Return True when the last iteration cycle's scores matched or exceeded the current ones.
+    """Return True when the most recent `min_consecutive_regressions` iteration
+    transitions in a row each regressed on both functional and human scores.
 
-    A single "did not improve" signal after a previous needs_iteration cycle is
-    enough to stop — this mirrors the expectation that the engine should not
-    spin the same cycle indefinitely without making progress.
+    2026-04-21 update: earlier behaviour was "single no-improvement cycle
+    trips". The 15차 live run (`memory/live-run-2026-04-21.md` cycles 3 → 4)
+    showed that LLM planners can recover in the very next cycle after a
+    one-off regression, so a single dip should not end the loop. The new rule
+    waits for a sustained downward streak.
+
+    Streak semantics: build the chain
+        prior_needs_iteration_entries + [current]
+    and check whether the last `min_consecutive_regressions + 1` points form
+    `min_consecutive_regressions` consecutive "neither score improved"
+    transitions. One upward move anywhere in the tail breaks the streak.
     """
     prior_iterations = [
         entry for entry in score_history if entry.get("decision") == "needs_iteration"
     ]
-    if not prior_iterations:
+    points: list[tuple[float, float]] = []
+    for entry in prior_iterations:
+        try:
+            f = float(entry.get("functional_score", 0.0) or 0.0)
+            h = float(entry.get("human_score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        points.append((f, h))
+    points.append((current_functional, current_human))
+
+    required = max(1, int(min_consecutive_regressions))
+    if len(points) < required + 1:
         return False
-    previous = prior_iterations[-1]
-    try:
-        prev_fun = float(previous.get("functional_score", 0.0) or 0.0)
-        prev_hum = float(previous.get("human_score", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return False
-    functional_improved = current_functional > prev_fun
-    human_improved = current_human > prev_hum
-    return not (functional_improved or human_improved)
+    tail = points[-(required + 1):]
+    for i in range(1, len(tail)):
+        prev_f, prev_h = tail[i - 1]
+        cur_f, cur_h = tail[i]
+        if cur_f > prev_f or cur_h > prev_h:
+            return False
+    return True
 
 
 _DECISION_TO_STATE = {

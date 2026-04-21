@@ -159,9 +159,9 @@ def main() -> int:
     )
 
     # ------------------------------------------------------------------
-    # stagnation detection
+    # stagnation detection (2026-04-21 relaxed: 3 consecutive regressions)
     # ------------------------------------------------------------------
-    history_no_improvement = [
+    history_one_iteration = [
         {
             "cycle": 1,
             "decision": "needs_iteration",
@@ -173,16 +173,15 @@ def main() -> int:
     decision = _apply_iteration_policy(
         _needs_iteration_decision(),
         cycle_index=2,
-        score_history=history_no_improvement,
+        score_history=history_one_iteration,
         limits={"max_cycles": 6, "stop_on_stagnation": True},
         functional_review=functional,
         human_review=human,
     )
     results.append(
         run_case(
-            "two flat cycles -> stagnation_detected",
-            decision["decision"] == "stagnation_detected"
-            and decision["next_state"] == EngineState.BLOCKED.value,
+            "single flat cycle does NOT trip stagnation (2026-04-21 relaxed)",
+            decision["decision"] == "needs_iteration",
             f"got {decision}",
         )
     )
@@ -191,7 +190,7 @@ def main() -> int:
     decision = _apply_iteration_policy(
         _needs_iteration_decision(),
         cycle_index=2,
-        score_history=history_no_improvement,
+        score_history=history_one_iteration,
         limits={"max_cycles": 6, "stop_on_stagnation": True},
         functional_review=functional,
         human_review=human,
@@ -208,7 +207,7 @@ def main() -> int:
     decision = _apply_iteration_policy(
         _needs_iteration_decision(),
         cycle_index=2,
-        score_history=history_no_improvement,
+        score_history=history_one_iteration,
         limits={"max_cycles": 6, "stop_on_stagnation": False},
         functional_review=functional,
         human_review=human,
@@ -218,6 +217,77 @@ def main() -> int:
             "stop_on_stagnation=false does not trip the stagnation stop",
             decision["decision"] == "needs_iteration",
             f"got {decision}",
+        )
+    )
+
+    # Three consecutive regressions (f and h both non-improving 3 transitions
+    # in a row) — the new threshold that should still trip.
+    history_three_regressions = [
+        {"cycle": 1, "decision": "needs_iteration", "functional_score": 1.0, "human_score": 1.0},
+        {"cycle": 2, "decision": "needs_iteration", "functional_score": 0.8, "human_score": 0.8},
+        {"cycle": 3, "decision": "needs_iteration", "functional_score": 0.5, "human_score": 0.5},
+    ]
+    functional, human = _fake_reviews(0.3, 0.3)
+    decision = _apply_iteration_policy(
+        _needs_iteration_decision(),
+        cycle_index=4,
+        score_history=history_three_regressions,
+        limits={"max_cycles": 6, "stop_on_stagnation": True},
+        functional_review=functional,
+        human_review=human,
+    )
+    results.append(
+        run_case(
+            "three consecutive regressions trip stagnation",
+            decision["decision"] == "stagnation_detected"
+            and decision["next_state"] == EngineState.BLOCKED.value,
+            f"got {decision}",
+        )
+    )
+
+    # Recovery in the middle breaks the streak — even if the very last cycle
+    # regresses, earlier upward move resets the counter.
+    history_with_recovery = [
+        {"cycle": 1, "decision": "needs_iteration", "functional_score": 1.0, "human_score": 1.0},
+        {"cycle": 2, "decision": "needs_iteration", "functional_score": 0.4, "human_score": 0.4},
+        {"cycle": 3, "decision": "needs_iteration", "functional_score": 0.7, "human_score": 0.7},
+        {"cycle": 4, "decision": "needs_iteration", "functional_score": 0.5, "human_score": 0.5},
+    ]
+    functional, human = _fake_reviews(0.4, 0.4)
+    decision = _apply_iteration_policy(
+        _needs_iteration_decision(),
+        cycle_index=5,
+        score_history=history_with_recovery,
+        limits={"max_cycles": 6, "stop_on_stagnation": True},
+        functional_review=functional,
+        human_review=human,
+    )
+    results.append(
+        run_case(
+            "recovery cycle in the middle breaks regression streak",
+            decision["decision"] == "needs_iteration",
+            f"got {decision}",
+        )
+    )
+
+    # Direct _is_stagnating unit — cycle 1 ~ 4 mirroring the 15차 live run
+    # trajectory (1.0/0.84 → 0.96/0.95 → 0.28/0.32 → 0.86/0.78). Under the
+    # new rule this must NOT be flagged stagnating at cycle 3 (only one
+    # transition is a double-regression), so the backstop would have left
+    # the door open for cycle 4's recovery.
+    live15_history_through_cycle_2 = [
+        {"cycle": 1, "decision": "needs_iteration", "functional_score": 1.0, "human_score": 0.84},
+        {"cycle": 2, "decision": "needs_iteration", "functional_score": 0.96, "human_score": 0.95},
+    ]
+    results.append(
+        run_case(
+            "15차 live run cycle 3 (0.28/0.32) no longer trips stagnation",
+            not _is_stagnating(
+                score_history=live15_history_through_cycle_2,
+                current_functional=0.28,
+                current_human=0.32,
+            ),
+            "expected False",
         )
     )
 
