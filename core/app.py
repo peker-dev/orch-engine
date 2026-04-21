@@ -11,7 +11,13 @@ from typing import Callable
 
 import yaml
 
-from adapters.base import AdapterExecutionError, AdapterFatalError, BaseAdapter, Invocation
+from adapters.base import (
+    AdapterExecutionError,
+    AdapterFatalError,
+    AdapterQuotaExceededError,
+    BaseAdapter,
+    Invocation,
+)
 from adapters.claude_cli import ClaudeCliAdapter
 from adapters.codex_cli import CodexCliAdapter
 from core.artifact_store import ArtifactStore
@@ -52,6 +58,24 @@ def parse_args() -> argparse.Namespace:
         choices=("true", "false"),
         default=None,
         help="Hard stop when two consecutive needs_iteration cycles fail to improve scores.",
+    )
+    init_parser.add_argument(
+        "--auto-wait",
+        choices=("true", "false"),
+        default=None,
+        help="When provider quota is exhausted, pause via tools.usage_wait and resume automatically.",
+    )
+    init_parser.add_argument(
+        "--wait-poll-interval-sec",
+        type=int,
+        default=None,
+        help="Seconds between quota refill probes when auto-wait is active.",
+    )
+    init_parser.add_argument(
+        "--wait-max-hours",
+        type=float,
+        default=None,
+        help="Hard upper bound (hours) a single auto-wait may block.",
     )
     init_parser.set_defaults(func=run_init)
 
@@ -148,11 +172,19 @@ def run_init(args: argparse.Namespace) -> int:
         {"domain": {"selected": args.domain, "calibrated": False}},
     )
 
-    # Override the template limits.yaml when the user supplied --max-cycles or
-    # --stop-on-stagnation. Preserves other fields (token_preflight etc.).
-    overrides_provided = getattr(args, "max_cycles", None) is not None or getattr(
-        args, "stop_on_stagnation", None
-    ) is not None
+    # Override the template limits.yaml when the user supplied --max-cycles,
+    # --stop-on-stagnation, or the --auto-wait/--wait-* trio. Preserves other
+    # fields (token_preflight etc.).
+    overrides_provided = any(
+        getattr(args, key, None) is not None
+        for key in (
+            "max_cycles",
+            "stop_on_stagnation",
+            "auto_wait",
+            "wait_poll_interval_sec",
+            "wait_max_hours",
+        )
+    )
     if overrides_provided:
         limits_path = orch_root / "config" / "limits.yaml"
         limits_doc = _read_yaml(limits_path)
@@ -163,6 +195,17 @@ def run_init(args: argparse.Namespace) -> int:
             limits_section["max_cycles"] = max(0, int(args.max_cycles))
         if getattr(args, "stop_on_stagnation", None) is not None:
             limits_section["stop_on_stagnation"] = args.stop_on_stagnation == "true"
+        wait_cfg = limits_section.get("usage_wait")
+        if not isinstance(wait_cfg, dict):
+            wait_cfg = {}
+        if getattr(args, "auto_wait", None) is not None:
+            wait_cfg["auto_wait"] = args.auto_wait == "true"
+        if getattr(args, "wait_poll_interval_sec", None) is not None:
+            wait_cfg["poll_interval_sec"] = max(30, int(args.wait_poll_interval_sec))
+        if getattr(args, "wait_max_hours", None) is not None:
+            wait_cfg["max_hours"] = max(0.1, float(args.wait_max_hours))
+        if wait_cfg:
+            limits_section["usage_wait"] = wait_cfg
         limits_doc["limits"] = limits_section
         _write_yaml(limits_path, limits_doc)
 
@@ -299,6 +342,10 @@ def run_cycle(args: argparse.Namespace) -> int:
             detail=f"실패: {type(exc).__name__}",
         )
         _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
+        if isinstance(exc, AdapterQuotaExceededError):
+            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
+            print(f"사이클 {cycle_index} 중단 (quota 고갈): {exc}")
+            return 3
         print(f"사이클 {cycle_index} 중단 (adapter 실패): {exc}")
         return 2
     _log_step_end(
@@ -401,6 +448,10 @@ def run_cycle(args: argparse.Namespace) -> int:
         )
     except (AdapterFatalError, AdapterExecutionError) as exc:
         _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
+        if isinstance(exc, AdapterQuotaExceededError):
+            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
+            print(f"사이클 {cycle_index} 중단 (quota 고갈): {exc}")
+            return 3
         print(f"사이클 {cycle_index} 중단 (adapter 실패): {exc}")
         return 2
 
@@ -423,6 +474,10 @@ def run_cycle(args: argparse.Namespace) -> int:
         )
     except (AdapterFatalError, AdapterExecutionError) as exc:
         _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
+        if isinstance(exc, AdapterQuotaExceededError):
+            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
+            print(f"사이클 {cycle_index} 중단 (quota 고갈, orchestrator 단계): {exc}")
+            return 3
         print(f"사이클 {cycle_index} 중단 (orchestrator LLM 실패): {exc}")
         return 2
     decision = _apply_iteration_policy(
@@ -496,7 +551,11 @@ def _run_token_preflight(
     round_budget = int(token_settings.get("round_budget_tokens", 8000))
     warn_ratio = float(token_settings.get("warn_at_ratio", 0.75))
     output_reserve = int(token_settings.get("output_reserve_per_role", 400))
-    active_roles = [role for role in roles_config if role in {"planner", "builder", "verifier_functional", "verifier_human"}]
+    active_roles = [
+        role
+        for role in roles_config
+        if role in {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
+    ]
     input_estimate = ceil(len(project_goal) / 4) + (len(active_roles) * 180)
     output_estimate = len(active_roles) * output_reserve
     total_estimate = input_estimate + output_estimate
@@ -624,12 +683,15 @@ def _finalize_adapter_failure(
     failed_role = str(session.get("active_role") or "")
     error_class = type(exc).__name__
     artifact_path = _latest_adapter_artifact_path(target_root, failed_role)
+    is_quota = isinstance(exc, AdapterQuotaExceededError)
+    decision = "quota_exceeded" if is_quota else "adapter_error"
     payload = {
         "cycle": cycle_index,
         "role": failed_role,
         "error_class": error_class,
         "message": str(exc),
         "fatal": isinstance(exc, AdapterFatalError),
+        "quota_exceeded": is_quota,
         "artifact_path": artifact_path,
     }
     runtime.write_json(
@@ -639,7 +701,7 @@ def _finalize_adapter_failure(
             "state": EngineState.BLOCKED.value,
             "active_role": None,
             "cycle": cycle_index,
-            "last_decision": "adapter_error",
+            "last_decision": decision,
             "last_decision_reason": str(exc),
             "last_error_class": error_class,
             "last_error_role": failed_role,
@@ -647,7 +709,83 @@ def _finalize_adapter_failure(
             "handoff_pause_count": 0,
         },
     )
-    runtime.append_event("adapter_failed", payload)
+    runtime.append_event(
+        "adapter_quota_exceeded" if is_quota else "adapter_failed", payload
+    )
+
+
+def _resolve_usage_wait_config(limits_config: dict) -> dict:
+    """Extract usage_wait defaults from limits.yaml with safe fallbacks."""
+    raw = {}
+    if isinstance(limits_config, dict):
+        raw = limits_config.get("usage_wait") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "auto_wait": bool(raw.get("auto_wait", False)),
+        "poll_interval_sec": max(30, int(raw.get("poll_interval_sec", 300) or 300)),
+        "max_hours": max(0.1, float(raw.get("max_hours", 6.0) or 6.0)),
+        "probe_role": str(raw.get("probe_role") or "planner"),
+        "probe_provider": raw.get("probe_provider"),
+    }
+
+
+def _maybe_auto_wait_for_quota(
+    *,
+    target_root: Path,
+    limits_config: dict,
+    exc: AdapterQuotaExceededError,
+) -> None:
+    """When auto_wait is enabled, block until provider quota refills.
+
+    Does not automatically resume the cycle — leaves it to the caller (launcher
+    or a rerun of `run-cycle`). The goal is only to pause the process so a
+    nightly autonomous loop can hold position until quota returns.
+    """
+    cfg = _resolve_usage_wait_config(limits_config)
+    if not cfg["auto_wait"]:
+        print(
+            f"[quota] auto_wait 비활성 — {exc} 상태에서 사이클 종료. "
+            "리필 후 `python -m core.app run-cycle` 을 다시 실행하세요.",
+            flush=True,
+        )
+        return
+    try:
+        from tools.usage_wait import wait_for_quota  # local import to keep CLI import light
+    except ImportError as import_exc:  # pragma: no cover - defensive
+        print(f"[quota] usage_wait 모듈 로드 실패, 수동 재시도 필요: {import_exc}", flush=True)
+        return
+    probe_provider = cfg["probe_provider"]
+    if not probe_provider:
+        roles_path = target_root / ".orch" / "config" / "roles.yaml"
+        if roles_path.exists():
+            try:
+                roles_doc = yaml.safe_load(roles_path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                roles_doc = {}
+            roles_block = roles_doc.get("roles") if isinstance(roles_doc, dict) else {}
+            if isinstance(roles_block, dict):
+                probe_provider = roles_block.get(cfg["probe_role"])
+    probe_provider = str(probe_provider or "claude_cli")
+    print(
+        f"[quota] auto_wait 활성 — {probe_provider}/{cfg['probe_role']} 프로브로 "
+        f"{cfg['poll_interval_sec']}s 간격, 최대 {cfg['max_hours']}h 대기 시작.",
+        flush=True,
+    )
+    rc = wait_for_quota(
+        target=target_root,
+        probe_role=cfg["probe_role"],
+        probe_provider=probe_provider,
+        poll_interval_sec=cfg["poll_interval_sec"],
+        max_hours=cfg["max_hours"],
+    )
+    if rc == 0:
+        print(
+            "[quota] 프로브 성공. `python -m core.app run-cycle` 을 다시 실행하면 이어갑니다.",
+            flush=True,
+        )
+    else:
+        print(f"[quota] 대기 종료 (rc={rc}). 상태는 blocked 유지.", flush=True)
 
 
 def _latest_adapter_artifact_path(target_root: Path, role: str) -> str:
@@ -793,6 +931,13 @@ def _stringify_findings(items: object) -> list[str]:
     return lines
 
 
+_ORCHESTRATOR_DECISION_TO_SEVERITY = {
+    "complete_cycle": "info",
+    "needs_iteration": "warning",
+    "blocked": "critical",
+}
+
+
 def _collect_previous_reviews(runtime: RuntimeStore) -> dict[str, object]:
     """Build a compact summary of the most recent functional/human/handoff reviews.
 
@@ -802,6 +947,10 @@ def _collect_previous_reviews(runtime: RuntimeStore) -> dict[str, object]:
     `reviews/handoff_latest.json` is written by `handoff-ingest` and cleared
     whenever a cycle completes, so its presence implies the handoff feedback is
     still pending consumption by the next planner run.
+
+    Every entry carries a normalized triad `{kind, severity, suggestions}` on
+    top of its role-specific fields so downstream LLMs (planner, orchestrator)
+    can iterate a uniform shape without caring which role produced the entry.
     """
     summary: dict[str, object] = {}
     for role, path in (
@@ -813,39 +962,54 @@ def _collect_previous_reviews(runtime: RuntimeStore) -> dict[str, object]:
             continue
         if review.get("result") in (None, "", "not_run"):
             continue
+        suggestions = list(review.get("suggested_actions") or [])
         summary[role] = {
+            "kind": role,
+            "severity": review.get("result"),
+            "suggestions": suggestions,
             "result": review.get("result"),
             "score": review.get("score"),
             "summary": review.get("summary", ""),
             "findings": review.get("findings", []),
-            "suggested_actions": review.get("suggested_actions", []),
+            "suggested_actions": suggestions,
         }
     # Orchestrator's last judgment (Phase 3.5) — closes the feedback loop so
     # the next planner run sees decision reasoning + unresolved_items +
     # recommended_next_action without the engine having to hand-write a hint.
     orchestrator_review = runtime.read_json("reviews/orchestrator_latest.json", {})
     if isinstance(orchestrator_review, dict) and orchestrator_review.get("decision"):
+        decision = orchestrator_review.get("decision")
+        unresolved = list(orchestrator_review.get("unresolved_items") or [])
+        recommended = orchestrator_review.get("recommended_next_action", "")
+        orchestrator_suggestions = list(unresolved)
+        if recommended:
+            orchestrator_suggestions.append(recommended)
         summary["orchestrator"] = {
+            "kind": "orchestrator",
+            "severity": _ORCHESTRATOR_DECISION_TO_SEVERITY.get(str(decision), "info"),
+            "suggestions": orchestrator_suggestions,
             "cycle": orchestrator_review.get("cycle"),
-            "decision": orchestrator_review.get("decision"),
+            "decision": decision,
             "summary": orchestrator_review.get("summary", ""),
             "reason": orchestrator_review.get("reason", ""),
-            "unresolved_items": orchestrator_review.get("unresolved_items", []),
-            "recommended_next_action": orchestrator_review.get("recommended_next_action", ""),
+            "unresolved_items": unresolved,
+            "recommended_next_action": recommended,
         }
     handoff_review = runtime.read_json("reviews/handoff_latest.json", {})
     if isinstance(handoff_review, dict) and handoff_review.get("result"):
-        # Shape aligned with functional/human: {result, score, summary, findings,
-        # suggested_actions}. handoff produces no numeric score so it is kept as
-        # None for parity. handoff-specific fields (recommended_next_action,
-        # remaining_risks, decision_note) remain alongside.
         recommended = handoff_review.get("recommended_next_action", "")
+        handoff_suggestions: list[str] = []
+        if recommended:
+            handoff_suggestions.append(recommended)
         summary["handoff"] = {
+            "kind": "handoff",
+            "severity": handoff_review.get("result"),
+            "suggestions": handoff_suggestions,
             "result": handoff_review.get("result"),
             "score": None,
             "summary": handoff_review.get("summary", ""),
             "findings": handoff_review.get("findings", []),
-            "suggested_actions": [recommended] if recommended else [],
+            "suggested_actions": handoff_suggestions,
             "recommended_next_action": recommended,
             "remaining_risks": handoff_review.get("remaining_risks", []),
             "decision_note": handoff_review.get("decision_note", ""),

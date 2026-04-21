@@ -57,6 +57,15 @@ class AdapterFatalError(AdapterExecutionError):
     """Adapter failure that must not be retried (auth, missing binary, denied sandbox)."""
 
 
+class AdapterQuotaExceededError(AdapterExecutionError):
+    """Adapter failed because the provider's usage quota / rate limit is exhausted.
+
+    Distinct from AdapterFatalError because the condition is expected to recover
+    on its own once the provider's rolling window resets. The engine may opt to
+    pause and resume via `tools.usage_wait` instead of blocking the cycle.
+    """
+
+
 FATAL_EXIT_CODES = {
     127,  # command not found (POSIX)
     9009,  # command not found (Windows cmd)
@@ -72,6 +81,25 @@ FATAL_STDERR_MARKERS = (
     "sandbox denied",
     "command not found",
     "is not recognized as an internal or external command",
+)
+
+# Markers emitted by Claude/Codex CLIs when the subscription quota or rate limit
+# is exhausted. These are not fatal in the auth/binary sense — the quota will
+# refill on the provider's rolling window, so the engine treats them as
+# recoverable via `AdapterQuotaExceededError`.
+QUOTA_STDERR_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "quota exceeded",
+    "usage limit",
+    "usage-limit",
+    "5-hour limit",
+    "5 hour limit",
+    "weekly limit",
+    "limit reached",
+    "you have reached your",
+    "too many requests",
+    "429",
 )
 
 
@@ -174,9 +202,11 @@ class BaseCliAdapter(BaseAdapter):
             _write_text(attempt_dir / "stderr.txt", completed.stderr or "")
 
             if completed.returncode != 0:
-                fatal_reason = _detect_fatal_failure(
+                stderr_text = completed.stderr or ""
+                quota_reason = _detect_quota_failure(stderr_text=stderr_text)
+                fatal_reason = None if quota_reason else _detect_fatal_failure(
                     exit_code=completed.returncode,
-                    stderr_text=completed.stderr or "",
+                    stderr_text=stderr_text,
                 )
                 last_error = (
                     f"{self.provider_label} exited with code {completed.returncode} for role={invocation.role}"
@@ -184,12 +214,19 @@ class BaseCliAdapter(BaseAdapter):
                 _write_json(
                     attempt_dir / "error.json",
                     {
-                        "class": "fatal_process_failure" if fatal_reason else "non_zero_exit",
+                        "class": (
+                            "quota_exceeded" if quota_reason
+                            else "fatal_process_failure" if fatal_reason
+                            else "non_zero_exit"
+                        ),
                         "exit_code": completed.returncode,
                         "fatal_reason": fatal_reason,
+                        "quota_reason": quota_reason,
                         "message": last_error,
                     },
                 )
+                if quota_reason:
+                    raise AdapterQuotaExceededError(f"{last_error} ({quota_reason})")
                 if fatal_reason:
                     raise AdapterFatalError(f"{last_error} ({fatal_reason})")
                 if attempt == 2:
@@ -262,17 +299,44 @@ def _build_run_root(working_directory: Path, request_id: str) -> Path:
 
 def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: list[str]) -> str:
     role_guidance = {
-        "planner": "Break the objective into the smallest useful next task.",
+        "planner": (
+            "Break the objective into the smallest useful next task. "
+            "If previous_reviews is provided, treat each entry as a uniform triad "
+            "{kind, severity, suggestions}: `kind` tells you who produced it "
+            "(functional/human/handoff/orchestrator), `severity` is the headline "
+            "verdict (pass/fail/needs_iteration/block/complete_cycle/info/warning/critical), "
+            "and `suggestions` lists the concrete items still to address. Prioritize tasks "
+            "that resolve non-info severities before opening new work."
+        ),
         "builder": "Do the actual work in the working directory before you return JSON.",
-        "verifier_functional": "Verify using concrete evidence such as commands, tests, logs, or produced files whenever possible.",
-        "verifier_human": "Review from a human perspective and focus on quality, clarity, polish, and usability.",
+        "verifier_functional": (
+            "Verify using concrete evidence such as commands, tests, logs, or produced files whenever possible. "
+            "Then compare the final artifacts against the master objective itself, not just the active task's acceptance. "
+            "If the objective calls for something that does not yet exist on disk (e.g. objective mentions "
+            "'responsive + WCAG AA' but no styles.css or accessibility check has been produced), include that gap "
+            "in suggested_actions even when the active task looks done. Never report suggested_actions=[] while "
+            "an obvious objective-level item is still missing."
+        ),
+        "verifier_human": (
+            "Review from a human perspective and focus on quality, clarity, polish, and usability. "
+            "Judge whether a real user would feel the master objective has been achieved end-to-end — not just "
+            "whether the active task's acceptance is met. If the objective promises an experience that the "
+            "current artifacts clearly do not deliver (placeholder content, missing responsive behavior, broken "
+            "links, unverified accessibility), raise it in findings and suggested_actions even if the active "
+            "task itself is technically done."
+        ),
         "orchestrator": (
             "Decide whether this cycle is complete, should iterate, or is blocked. "
             "Weigh the original objective against the verifier reviews, suggested_actions, blocking_issues, "
             "and score_history supplied in context. The objective is the master mandate — a cycle is complete "
             "only when the objective is truly satisfied, not merely when scores exceed a threshold. If any "
-            "suggested_actions remain actionable, prefer needs_iteration. Use blocked only when the reviews "
-            "explicitly declare a hard stop or the same failure has repeated without progress."
+            "suggested_actions remain actionable, prefer needs_iteration. "
+            "Do not rely on verifiers alone: compare the master objective wording directly with existing_artifacts "
+            "in context. If the objective demands something the artifacts clearly lack (e.g. responsive CSS, "
+            "accessibility evidence, real content instead of placeholders) but verifiers missed it, raise it "
+            "yourself in unresolved_items and choose needs_iteration. "
+            "Use blocked only when the reviews explicitly declare a hard stop or the same failure has repeated "
+            "without progress."
         ),
     }[invocation.role]
     scope_guidance = {
@@ -339,6 +403,19 @@ def _detect_fatal_failure(exit_code: int, stderr_text: str) -> str | None:
         return f"exit_code_{exit_code}"
     lowered = stderr_text.lower()
     for marker in FATAL_STDERR_MARKERS:
+        if marker in lowered:
+            return f"stderr_marker:{marker}"
+    return None
+
+
+def _detect_quota_failure(stderr_text: str) -> str | None:
+    """Return a quota marker if the CLI complained about rate/quota limits.
+
+    Checked before the auth/fatal detection so a quota-exceeded error is not
+    misclassified as a login problem.
+    """
+    lowered = stderr_text.lower()
+    for marker in QUOTA_STDERR_MARKERS:
         if marker in lowered:
             return f"stderr_marker:{marker}"
     return None

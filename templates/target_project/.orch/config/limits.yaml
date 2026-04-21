@@ -8,6 +8,12 @@
       "round_budget_tokens": 60000,
       "warn_at_ratio": 0.75,
       "output_reserve_per_role": 1200
+    },
+    "usage_wait": {
+      "auto_wait": false,
+      "poll_interval_sec": 300,
+      "max_hours": 6.0,
+      "probe_role": "planner"
     }
   }
 }
