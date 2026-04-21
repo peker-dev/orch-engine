@@ -95,20 +95,29 @@ def _collect_entries(runs_root: Path) -> list[tuple[datetime, str, str]]:
 
 
 def _parse_run_dirname(name: str) -> tuple[datetime, str, str] | None:
+    """Parse `{provider}-{role}-{YYYYMMDD}-{HHMMSS}-{uuid8}` produced by
+    adapters.base.BaseCliAdapter.
+
+    Reverses from the tail because the last four dash segments are fixed
+    (date, time, uuid8-hex, nothing beyond). Everything before that belongs to
+    provider+role. Current provider ids (claude_cli, codex_cli, fake_build) have
+    no dashes so parts[0] is provider; but if a future provider uses a dashed
+    id, this parser still recovers role correctly because it trims from the end.
+    Role tokens are rejoined with `_` — current LLM roles use underscores
+    (verifier_functional, verifier_human), and no role today contains a dash.
+    """
     parts = name.split("-")
     if len(parts) < 5:
         return None
-    provider = parts[0]
-    role_tokens: list[str] = []
-    idx = 1
-    while idx < len(parts) - 3:
-        role_tokens.append(parts[idx])
-        idx += 1
-    if idx + 2 >= len(parts):
+    uuid_token = parts[-1]
+    time_token = parts[-2]
+    date_token = parts[-3]
+    head_tokens = parts[:-3]
+    if not head_tokens or len(uuid_token) < 4:
         return None
-    role = "-".join(role_tokens) if role_tokens else parts[1]
-    date_token = parts[idx]
-    time_token = parts[idx + 1]
+    provider = head_tokens[0]
+    role_tokens = head_tokens[1:]
+    role = "_".join(role_tokens) if role_tokens else ""
     try:
         ts = datetime.strptime(f"{date_token}{time_token}", "%Y%m%d%H%M%S")
     except ValueError:

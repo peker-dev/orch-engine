@@ -694,21 +694,23 @@ def _finalize_adapter_failure(
         "quota_exceeded": is_quota,
         "artifact_path": artifact_path,
     }
-    runtime.write_json(
-        "runtime/session.json",
-        {
-            **session,
-            "state": EngineState.BLOCKED.value,
-            "active_role": None,
-            "cycle": cycle_index,
-            "last_decision": decision,
-            "last_decision_reason": str(exc),
-            "last_error_class": error_class,
-            "last_error_role": failed_role,
-            "last_error_artifact_path": artifact_path,
-            "handoff_pause_count": 0,
-        },
-    )
+    # Quota 실패는 recoverable — 재개 시 사이클 예산/handoff pause 상태를 그대로
+    # 이어가는 게 자연스럽다. 일반 adapter 실패는 세션이 실질적으로 재시작되는
+    # 경우가 많아 기존 정책대로 handoff_pause_count 를 0 으로 리셋한다.
+    session_update: dict[str, object] = {
+        **session,
+        "state": EngineState.BLOCKED.value,
+        "active_role": None,
+        "cycle": cycle_index,
+        "last_decision": decision,
+        "last_decision_reason": str(exc),
+        "last_error_class": error_class,
+        "last_error_role": failed_role,
+        "last_error_artifact_path": artifact_path,
+    }
+    if not is_quota:
+        session_update["handoff_pause_count"] = 0
+    runtime.write_json("runtime/session.json", session_update)
     runtime.append_event(
         "adapter_quota_exceeded" if is_quota else "adapter_failed", payload
     )

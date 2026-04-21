@@ -16,8 +16,12 @@ Behavior
   the requested role (default planner role via roles.yaml) with a minimal
   objective. Success means the provider accepted the call — quota is live.
 - On `AdapterQuotaExceededError` the loop sleeps the interval and retries.
-- On any other exception the tool exits rc=2 so the caller does not treat a
-  real failure as "still waiting".
+- On `AdapterFatalError` (auth, missing binary) the tool exits rc=2 immediately
+  because no amount of waiting will fix those.
+- On a non-quota `AdapterExecutionError` (timeout, schema error, generic
+  non-zero exit), the probe counts as inconclusive and the loop retries, but a
+  streak of `--max-consecutive-errors` (default 3) in a row exits rc=2 to avoid
+  silent infinite polling when the failure is unrelated to quota.
 - Stops after `--max-hours` (default 6) and exits rc=3.
 - Ctrl+C exits rc=4 (user abort).
 - On success exits rc=0 and writes a small report to
@@ -79,8 +83,15 @@ def _build_probe_adapter(provider_id: str):
     )
 
 
-def _attempt_probe(target: Path, role: str, provider_id: str) -> tuple[bool, str]:
-    """Try one cheap invocation. Return (ready, reason)."""
+def _attempt_probe(target: Path, role: str, provider_id: str) -> tuple[str, str]:
+    """Try one cheap invocation. Return (outcome, reason).
+
+    outcome is one of: "ready", "quota", "inconclusive". "ready" means the
+    provider accepted the call; "quota" means it rejected with a quota marker
+    and we should keep waiting; "inconclusive" means some other recoverable
+    error happened. `AdapterFatalError` bypasses this function and terminates
+    the process.
+    """
     adapter = _build_probe_adapter(provider_id)
     try:
         adapter.invoke(
@@ -91,13 +102,13 @@ def _attempt_probe(target: Path, role: str, provider_id: str) -> tuple[bool, str
                 context={"probe": True},
             )
         )
-        return True, "probe accepted"
+        return "ready", "probe accepted"
     except AdapterQuotaExceededError as exc:
-        return False, f"quota: {exc}"
+        return "quota", f"quota: {exc}"
     except AdapterFatalError as exc:
         raise SystemExit(RC_USAGE) from exc
     except AdapterExecutionError as exc:
-        return False, f"non-quota adapter error: {exc}"
+        return "inconclusive", f"non-quota adapter error: {exc}"
 
 
 def _write_result(target: Path, payload: dict) -> None:
@@ -115,16 +126,31 @@ def wait_for_quota(
     probe_provider: str,
     poll_interval_sec: int,
     max_hours: float,
+    max_consecutive_errors: int = 3,
 ) -> int:
     start = datetime.now(timezone.utc)
     deadline_seconds = max_hours * 3600
     attempts = 0
+    consecutive_errors = 0
+    aborted = {"flag": False}
     print(
         f"[usage_wait] probing {probe_provider}/{probe_role} every {poll_interval_sec}s "
         f"for up to {max_hours}h"
     )
 
     def handle_sigint(signum, frame):
+        # Ctrl+C 타이밍에 따라 Windows PowerShell에서는 subprocess만 죽고
+        # Python 본체는 KeyboardInterrupt로만 탈출할 수도 있어, 파일 기록과
+        # rc=4 종료는 finally 블록에서 flag를 보고 한 번 더 보장한다.
+        aborted["flag"] = True
+        raise KeyboardInterrupt
+
+    try:
+        previous_handler = signal.signal(signal.SIGINT, handle_sigint)
+    except (ValueError, OSError):
+        previous_handler = None
+
+    def _persist_abort() -> None:
         _write_result(
             target,
             {
@@ -135,20 +161,18 @@ def wait_for_quota(
             },
         )
         print("[usage_wait] aborted by user", file=sys.stderr)
-        raise SystemExit(RC_ABORTED)
-
-    try:
-        previous_handler = signal.signal(signal.SIGINT, handle_sigint)
-    except (ValueError, OSError):
-        previous_handler = None
 
     try:
         while True:
             attempts += 1
-            ready, reason = _attempt_probe(target, probe_role, probe_provider)
+            try:
+                outcome, reason = _attempt_probe(target, probe_role, probe_provider)
+            except KeyboardInterrupt:
+                _persist_abort()
+                return RC_ABORTED
             now = datetime.now(timezone.utc)
             elapsed = (now - start).total_seconds()
-            if ready:
+            if outcome == "ready":
                 print(f"[usage_wait] READY after {int(elapsed)}s and {attempts} attempts")
                 _write_result(
                     target,
@@ -162,7 +186,32 @@ def wait_for_quota(
                     },
                 )
                 return RC_READY
-            print(f"[usage_wait] still waiting ({int(elapsed)}s, attempt {attempts}): {reason}")
+            if outcome == "quota":
+                consecutive_errors = 0
+            else:  # "inconclusive"
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    print(
+                        f"[usage_wait] giving up after {consecutive_errors} consecutive "
+                        f"non-quota errors (last reason: {reason})",
+                        file=sys.stderr,
+                    )
+                    _write_result(
+                        target,
+                        {
+                            "result": "inconclusive",
+                            "attempts": attempts,
+                            "consecutive_errors": consecutive_errors,
+                            "last_reason": reason,
+                            "started_at": start.isoformat(),
+                            "ended_at": now.isoformat(),
+                        },
+                    )
+                    return RC_USAGE
+            print(
+                f"[usage_wait] still waiting ({int(elapsed)}s, attempt {attempts}, "
+                f"outcome={outcome}): {reason}"
+            )
             if elapsed >= deadline_seconds:
                 print(
                     f"[usage_wait] deadline reached ({max_hours}h); giving up",
@@ -178,8 +227,18 @@ def wait_for_quota(
                     },
                 )
                 return RC_TIMEOUT
-            time.sleep(poll_interval_sec)
+            try:
+                time.sleep(poll_interval_sec)
+            except KeyboardInterrupt:
+                _persist_abort()
+                return RC_ABORTED
     finally:
+        if aborted["flag"]:
+            # 핸들러에서 KeyboardInterrupt 만 올라오는 경로에서 finally가 먼저
+            # 돌 수 있어 이중 기록을 방지. aborted 파일이 아직 없으면 기록.
+            runtime = target / ".orch" / "runtime" / "usage_wait_last.json"
+            if not runtime.exists():
+                _persist_abort()
         if previous_handler is not None:
             try:
                 signal.signal(signal.SIGINT, previous_handler)
@@ -202,6 +261,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-hours", type=float, default=6.0, help="Hard stop after this many hours"
     )
+    parser.add_argument(
+        "--max-consecutive-errors",
+        type=int,
+        default=3,
+        help="Exit rc=2 after this many non-quota probe failures in a row",
+    )
     args = parser.parse_args(argv)
 
     target = Path(args.target).resolve()
@@ -217,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         probe_provider=str(probe_provider),
         poll_interval_sec=max(30, int(args.poll_interval_sec)),
         max_hours=max(0.1, float(args.max_hours)),
+        max_consecutive_errors=max(1, int(args.max_consecutive_errors)),
     )
 
 

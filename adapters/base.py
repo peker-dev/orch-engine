@@ -87,6 +87,9 @@ FATAL_STDERR_MARKERS = (
 # is exhausted. These are not fatal in the auth/binary sense — the quota will
 # refill on the provider's rolling window, so the engine treats them as
 # recoverable via `AdapterQuotaExceededError`.
+# Note: bare "429" was tried earlier but matched paths and unrelated counters,
+# so only the parenthesized form "(429)" is kept here. Claude CLI's real quota
+# message already contains "too many requests".
 QUOTA_STDERR_MARKERS = (
     "rate limit",
     "rate-limit",
@@ -99,7 +102,8 @@ QUOTA_STDERR_MARKERS = (
     "limit reached",
     "you have reached your",
     "too many requests",
-    "429",
+    "(429)",
+    " 429 ",
 )
 
 
