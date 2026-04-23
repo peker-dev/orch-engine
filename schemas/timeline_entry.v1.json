@@ -28,7 +28,7 @@
       "enum": ["utterance", "engine"]
     },
     "speaker_provider": {
-      "description": "utterance 의 경우 실제로 발화를 생산한 LLM provider id (claude_cli, codex_cli 등). engine 엔트리는 비워도 됨.",
+      "description": "실제로 이 엔트리를 만든 LLM provider id (claude_cli, codex_cli 등). kind=utterance 에서는 필수(발화자 provider). kind=engine 에서는 특정 provider 와 관련된 이벤트(usage_pause, resumed 등)일 때만 채우고, provider 무관 이벤트(stop, note 등)는 비워둔다. 이 값이 있으면 engine_event.detail 안에 provider 를 또 넣지 않는다(중복 금지).",
       "type": "string",
       "minLength": 1
     },
@@ -43,9 +43,18 @@
       "required": ["event_type"],
       "properties": {
         "event_type": {
-          "description": "quota_wait=쿼터 고갈로 대기 시작/종료, session_resume=Claude --continue / Codex resume 재접속, stop=사용자 stop, fatal=복구 불가 종료, note=기타 메타 기록.",
+          "description": "엔진 시스템 이벤트 유형. 비영어권도 직관적으로 읽히도록 쉬운 단어로 통일. session_start=세션 시작, session_end=세션 종료(arbitration=agree 이후 엔진이 마무리 찍음), usage_pause=사용량 한도 대기(기존 quota_wait), resumed=세션 이어붙음(기존 session_resume), stop=사용자가 중단, failed=복구 불가 종료(기존 fatal), compaction=화이트보드 압축 이벤트, note=그 외 기타(naming 잡히지 않은 메모는 전부 여기).",
           "type": "string",
-          "enum": ["quota_wait", "session_resume", "stop", "fatal", "note"]
+          "enum": [
+            "session_start",
+            "session_end",
+            "usage_pause",
+            "resumed",
+            "stop",
+            "failed",
+            "compaction",
+            "note"
+          ]
         },
         "detail": {
           "description": "이벤트 상세. 자유 구조 허용. 예: quota_wait 의 provider/resume_eta, session_resume 의 replayed_tokens 등.",
@@ -97,14 +106,14 @@
       "utterance_index": 3,
       "timestamp": "2026-04-23T09:42:11.008Z",
       "kind": "engine",
+      "speaker_provider": "claude_cli",
       "engine_event": {
-        "event_type": "quota_wait",
+        "event_type": "usage_pause",
         "detail": {
-          "provider": "claude_cli",
           "resume_eta_utc": "2026-04-23T14:42:11Z",
           "poll_interval_sec": 300
         },
-        "message": "claude_cli quota 고갈, 5h 대기 진입"
+        "message": "claude_cli 사용량 한도 도달, 5h 대기 진입"
       }
     }
   ]

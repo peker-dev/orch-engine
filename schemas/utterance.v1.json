@@ -19,10 +19,10 @@
       "minLength": 1
     },
     "next_speaker": {
-      "description": "다음 발화를 요청하는 화자 역할 id. 자유 지명 (엔진 강제 라우팅 룰은 declare_done=true 직후 orchestrator 호출 하나뿐 — D5). 세션 종료 의사는 declare_done 으로 표현하고, next_speaker 는 그때도 후속 중재자(orchestrator)를 지명한다.",
+      "description": "다음 발화를 요청하는 화자 역할 id. 자유 지명 (엔진 강제 라우팅 룰은 declare_done=true 직후 orchestrator 호출 하나뿐 — D5). 세션을 여기서 종료하고 싶을 때는 예약어 '__end__' 사용. 일반적으로는 arbitration=agree 발화가 next_speaker='__end__' 로 종료 신호를 보낸다.",
       "type": "string",
       "minLength": 1,
-      "pattern": "^[a-z][a-z0-9_]*$"
+      "pattern": "^([a-z][a-z0-9_]*|__end__)$"
     },
     "declare_done": {
       "description": "true 이면 '이 관점에서는 목표 달성 완료'로 선언. 엔진은 즉시 orchestrator 를 강제 호출해 중재(agree/disagree)를 받는다. 미지정시 false 로 간주.",
@@ -35,17 +35,19 @@
       "enum": ["agree", "disagree", null]
     },
     "artifacts_snapshot": {
-      "description": "이 발화 시점에 화자가 관찰한 산출물 상태의 식별자 맵. stale 관점 감지(D7-b)용. key=artifact 경로 또는 논리명, value=content hash / mtime / version 등 엔진이 비교 가능한 식별자.",
+      "description": "이 발화 시점에 화자가 관찰한 산출물 상태의 식별자 맵. stale 관점 감지(D7-b)용. key=artifact 경로 또는 논리명, value=prefix 붙은 식별자 문자열. 컨벤션: 'sha256:<hex>' (엔진 기본, 내용 해시), 'ver:<버전>' (도메인이 수동 버전 관리 시), 'mtime:<unix_sec>' (해시 계산이 비싼 특수 케이스). prefix 누락 금지 — 다른 발화자가 같은 규칙으로 비교 못 하면 stale 판정이 깨진다.",
       "type": "object",
       "additionalProperties": {
-        "type": ["string", "number"]
+        "type": "string",
+        "pattern": "^(sha256|ver|mtime):[^\\s].*$"
       }
     },
     "artifacts_seen_snapshot": {
-      "description": "화자가 이 발화를 작성하기 전까지 실제로 읽거나 참조한 산출물의 식별자 맵. artifacts_snapshot 과 불일치하면 stale 판정 후보. 포맷은 artifacts_snapshot 과 동일.",
+      "description": "화자가 이 발화를 작성하기 전까지 실제로 읽거나 참조한 산출물의 식별자 맵. artifacts_snapshot 과 불일치하면 stale 판정 후보. 포맷은 artifacts_snapshot 과 동일(prefix 강제).",
       "type": "object",
       "additionalProperties": {
-        "type": ["string", "number"]
+        "type": "string",
+        "pattern": "^(sha256|ver|mtime):[^\\s].*$"
       }
     }
   },
@@ -106,6 +108,12 @@
       "body": "verifier_human 은 완료 선언, verifier_functional 은 직전 발화에서 CTA 미해결을 지적. 두 관점이 엇갈리므로 disagree 판정합니다. builder 가 CTA 문구를 교체한 뒤 재발화해주세요.",
       "next_speaker": "builder",
       "arbitration": "disagree"
+    },
+    {
+      "speaker": "orchestrator",
+      "body": "두 verifier 관점이 모두 통과했고, 사용자 원목표와 비교해도 남은 gap 이 없습니다. 세션을 여기서 마무리합니다.",
+      "next_speaker": "__end__",
+      "arbitration": "agree"
     }
   ]
 }
