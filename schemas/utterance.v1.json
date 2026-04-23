@@ -51,26 +51,7 @@
       }
     }
   },
-  "allOf": [
-    {
-      "description": "arbitration 필드는 speaker 가 orchestrator 이고 직전 발화가 declare_done=true 일 때만 의미가 있다. 스키마는 값 enum 까지만 검증; 호출 컨텍스트 검증은 엔진이 담당.",
-      "if": {
-        "properties": {
-          "arbitration": {
-            "type": "string"
-          }
-        },
-        "required": ["arbitration"]
-      },
-      "then": {
-        "properties": {
-          "speaker": {
-            "const": "orchestrator"
-          }
-        }
-      }
-    }
-  ],
+  "$comment": "arbitration 필드는 speaker=orchestrator 이고 직전 발화가 declare_done=true 일 때만 의미가 있다. 이 invariant 은 adapters/base.py._check_utterance_invariants 에서 엔진이 직접 검증한다 (과거에는 allOf/if-then 으로 선언했으나, Codex CLI → OpenAI response_format strict 모드가 allOf 를 거부해 18차 P0-D 실측에서 400 오류 발생. Phase 2 D4 '스키마는 값 enum 까지만, 호출 컨텍스트 검증은 엔진이 담당' 원칙을 실제로 따른다).",
   "examples": [
     {
       "speaker": "planner",

@@ -261,6 +261,7 @@ class BaseCliAdapter(BaseAdapter):
                 # Validate first, then stash routing metadata, then extract
                 # the role-specific structured state the engine consumes.
                 _validate_schema(raw_payload, schema)
+                _check_utterance_invariants(raw_payload)
                 utterance_meta: dict[str, object] = {
                     "speaker": raw_payload.get("speaker"),
                     "next_speaker": raw_payload.get("next_speaker"),
@@ -752,6 +753,25 @@ def _normalize_result(value: Any) -> str:
 def _validate_schema(instance: Any, schema: dict[str, Any], path: str = "root") -> None:
     """Thin internal alias so callers inside adapters keep using `_validate_schema`."""
     _shared_validate_schema(instance, schema, path)
+
+
+def _check_utterance_invariants(payload: dict[str, Any]) -> None:
+    """Enforce invariants that utterance.v1 intentionally keeps out of JSON Schema.
+
+    The `arbitration` field is only meaningful when speaker=orchestrator. This was
+    previously encoded as `allOf/if-then` in utterance.v1.json, but OpenAI's strict
+    response_format (used by Codex CLI) rejects `allOf`, causing a HTTP 400 before
+    the model ever runs. Enforcing the rule here keeps the schema compatible with
+    every provider while still blocking a non-orchestrator envelope that claims to
+    arbitrate.
+    """
+    arbitration = payload.get("arbitration")
+    if isinstance(arbitration, str):
+        speaker = payload.get("speaker")
+        if speaker != "orchestrator":
+            raise ValueError(
+                f"root.arbitration: only orchestrator may emit 'arbitration' (got speaker={speaker!r})"
+            )
 
 
 _FENCED_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
