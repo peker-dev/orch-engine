@@ -7,7 +7,7 @@
 범위:
 - `Claude CLI`
 - `Codex CLI`
-- 역할: `planner`, `builder`, `verifier_functional`, `verifier_human`
+- 역할: `planner`, `builder`, `verifier_functional`, `verifier_human`, `orchestrator`
 
 비범위:
 - API/서버형 provider
@@ -231,6 +231,7 @@ InvocationResult(
 - `builder`: 600초
 - `verifier_functional`: 300초
 - `verifier_human`: 240초
+- `orchestrator`: 120초
 
 retry 규칙:
 - JSON parse 실패: 1회 재시도
