@@ -23,7 +23,7 @@
       "format": "date-time"
     },
     "kind": {
-      "description": "엔트리 유형. utterance=에이전트 발화, engine=엔진 시스템 이벤트(quota_wait, session_resume, stop 등).",
+      "description": "엔트리 유형. utterance=에이전트 발화, engine=엔진 시스템 이벤트(session_start/session_end/usage_pause/resumed/stop/failed/compaction/note).",
       "type": "string",
       "enum": ["utterance", "engine"]
     },
@@ -57,7 +57,7 @@
           ]
         },
         "detail": {
-          "description": "이벤트 상세. 자유 구조 허용. 예: quota_wait 의 provider/resume_eta, session_resume 의 replayed_tokens 등.",
+          "description": "이벤트 상세. 자유 구조 허용. 예: usage_pause 의 resume_eta_utc/poll_interval_sec, resumed 의 replayed_tokens 등. provider 는 최상위 speaker_provider 에 이미 적혔으므로 여기 중복 기재 금지 (D18).",
           "type": "object",
           "additionalProperties": true
         },
