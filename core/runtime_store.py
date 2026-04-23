@@ -21,10 +21,16 @@ class RuntimeStore:
     def write_json(self, relative_path: str, payload: Any) -> None:
         path = self.orch_root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # Atomic write: staging file + replace. Guards against partial writes on
+        # disk-full / SIGKILL / concurrent reads. POSIX rename is atomic; on
+        # Windows Path.replace() maps to MoveFileEx with REPLACE_EXISTING, which
+        # is atomic for closed targets and fine for sequential engine usage.
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(
             json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
             encoding="utf-8",
         )
+        tmp_path.replace(path)
 
     def append_event(self, event_type: str, payload: dict[str, Any]) -> None:
         path = self.runtime_root / "events.jsonl"

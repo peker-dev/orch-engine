@@ -864,10 +864,19 @@ def _append_planner_timeline(
             },
         )
     except Exception as exc:  # noqa: BLE001 - best-effort append must not block pipeline
-        runtime.append_event(
-            "timeline_append_failed",
-            {"role": "planner", "cycle": cycle_index, "error": str(exc)},
-        )
+        # Double-fault guard: if even events.jsonl write fails (disk full, perms),
+        # drop to stderr so the failure is at least visible without crashing run_cycle.
+        try:
+            runtime.append_event(
+                "timeline_append_failed",
+                {"role": "planner", "cycle": cycle_index, "error": str(exc)},
+            )
+        except Exception as inner_exc:  # noqa: BLE001
+            print(
+                f"[timeline_append_failed_fallback] role=planner cycle={cycle_index} "
+                f"primary={exc} inner={inner_exc}",
+                file=sys.stderr,
+            )
 
 
 def _run_planner(

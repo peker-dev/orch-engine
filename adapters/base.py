@@ -244,9 +244,14 @@ class BaseCliAdapter(BaseAdapter):
                     provider_result_path=provider_result_path,
                     schema=schema,
                 )
-                payload = _normalize_role_payload(invocation.role, payload)
+                # Phase 2 transition: coerce utterance.v1 → legacy BEFORE normalize.
+                # Ordering matters — _normalize_role_payload fills in required task fields
+                # (id/title/acceptance/priority/notes), so the coerced output must pass
+                # through normalize so that fenced-json tasks lacking some fields still
+                # validate. See reviewer finding A-5.
                 if invocation.role == "planner":
                     payload = _coerce_planner_utterance_to_legacy(payload)
+                payload = _normalize_role_payload(invocation.role, payload)
                 _validate_schema(payload, schema)
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
@@ -369,12 +374,25 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "verifier_human": "Do not modify files during review.",
         "orchestrator": "Do not modify files. You are a judgment-only role.",
     }[invocation.role]
+    if invocation.role == "planner":
+        format_rule = (
+            "Return exactly one JSON object. The OUTER envelope must be plain JSON "
+            "(no markdown, no outer code fences). Phase 2 transition exception: if you "
+            "choose the utterance.v1 shape, you MAY use markdown inside the 'body' field "
+            "and embed exactly one fenced ```json``` block carrying the legacy task "
+            "payload. The 'no markdown / no fences' rule still applies to everything "
+            "outside body.\n"
+        )
+    else:
+        format_rule = (
+            "Return exactly one JSON object that matches the enforced schema.\n"
+            "Do not use markdown.\n"
+            "Do not wrap the JSON in code fences.\n"
+        )
     return (
         f"You are running as orch-engine role '{invocation.role}'.\n"
-        "Return exactly one JSON object that matches the enforced schema.\n"
-        "Do not use markdown.\n"
-        "Do not wrap the JSON in code fences.\n"
-        f"{role_guidance}\n"
+        + format_rule
+        + f"{role_guidance}\n"
         f"{scope_guidance}\n"
         f"Objective: {invocation.objective}\n"
         f"Working directory: {Path(invocation.working_directory).resolve()}\n"
