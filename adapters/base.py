@@ -48,6 +48,13 @@ class InvocationResult:
     status: str
     summary: str
     payload: dict[str, object] | None = None
+    # Phase 2 free-utterance routing metadata (D4/D5). Present only when the
+    # provider returned a utterance.v1 shape; contains the original speaker /
+    # next_speaker / declare_done / arbitration fields BEFORE coerce dropped
+    # them in favour of the legacy role payload. run_cycle reads this to
+    # dispatch the next speaker; absent -> engine falls back to the legacy
+    # role chain (planner -> builder -> verifier_f -> verifier_h -> orchestrator).
+    utterance: dict[str, object] | None = None
 
 
 class AdapterExecutionError(RuntimeError):
@@ -244,6 +251,18 @@ class BaseCliAdapter(BaseAdapter):
                     provider_result_path=provider_result_path,
                     schema=schema,
                 )
+                # Phase 2 free-utterance routing (D4/D5): if payload is an
+                # utterance.v1 shape, stash its routing metadata BEFORE coerce
+                # strips it down to legacy role fields. run_cycle will read this
+                # to dispatch the next speaker; absent -> legacy chain fallback.
+                utterance_meta: dict[str, object] | None = None
+                if isinstance(payload, dict) and _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+                    utterance_meta = {
+                        "speaker": payload.get("speaker"),
+                        "next_speaker": payload.get("next_speaker"),
+                        "declare_done": bool(payload.get("declare_done") or False),
+                        "arbitration": payload.get("arbitration"),
+                    }
                 # Phase 2 transition: coerce utterance.v1 → legacy BEFORE normalize.
                 # Ordering matters — _normalize_role_payload fills in required role
                 # fields, so the coerced output must pass through normalize so that
@@ -279,6 +298,7 @@ class BaseCliAdapter(BaseAdapter):
                 status="ok",
                 summary=str(normalized["summary"]),
                 payload=payload,
+                utterance=utterance_meta,
             )
 
         raise AdapterExecutionError(last_error or f"{self.provider_label} failed for role={invocation.role}")

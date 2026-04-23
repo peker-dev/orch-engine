@@ -81,6 +81,21 @@ class ScriptedAdapter(BaseAdapter):
             raise AdapterQuotaExceededError(
                 f"scripted quota: {self.role} hit rate limit on cycle {cycle_index}"
             )
+        # Phase 2 D4/D5 hook: plan entries can attach per-role utterance
+        # routing metadata via `utterances: {role: {next_speaker, declare_done}}`.
+        # When present, the ScriptedAdapter returns it as
+        # InvocationResult.utterance so run_cycle can exercise the free-
+        # utterance dispatch instead of the legacy role chain.
+        utterance_map = entry.get("utterances") or {}
+        role_utt = utterance_map.get(self.role) if isinstance(utterance_map, dict) else None
+        utt_meta: dict[str, Any] | None = None
+        if isinstance(role_utt, dict):
+            utt_meta = {
+                "speaker": self.role,
+                "next_speaker": role_utt.get("next_speaker"),
+                "declare_done": bool(role_utt.get("declare_done") or False),
+                "arbitration": role_utt.get("arbitration"),
+            }
         if self.role == "planner":
             return InvocationResult(
                 status="ok",
@@ -99,6 +114,7 @@ class ScriptedAdapter(BaseAdapter):
                     ],
                     "risks": [],
                 },
+                utterance=utt_meta,
             )
         if self.role == "builder":
             return InvocationResult(
@@ -111,6 +127,7 @@ class ScriptedAdapter(BaseAdapter):
                     "artifact_paths": [],
                     "self_check": {"summary": "ok", "unresolved": []},
                 },
+                utterance=utt_meta,
             )
         if self.role == "verifier_functional":
             return InvocationResult(
@@ -125,6 +142,7 @@ class ScriptedAdapter(BaseAdapter):
                     "blocking_issues": [],
                     "suggested_actions": [],
                 },
+                utterance=utt_meta,
             )
         if self.role == "verifier_human":
             return InvocationResult(
@@ -139,6 +157,7 @@ class ScriptedAdapter(BaseAdapter):
                     "comparison_notes": [],
                     "suggested_actions": [],
                 },
+                utterance=utt_meta,
             )
         if self.role == "orchestrator":
             # Test scenarios may override orchestrator judgment explicitly via
@@ -169,6 +188,7 @@ class ScriptedAdapter(BaseAdapter):
                     "unresolved_items": [str(item) for item in unresolved],
                     "recommended_next_action": str(entry.get("orchestrator_recommendation", "")),
                 },
+                utterance=utt_meta,
             )
         raise ValueError(f"Unsupported role: {self.role}")
 
@@ -646,12 +666,184 @@ def _scenario_needs_iteration_then_success(sandbox: Path) -> ScenarioResult:
     )
 
 
+def _scenario_utterance_next_speaker_skips_legacy_chain(sandbox: Path) -> ScenarioResult:
+    """Phase 2 D5 rule #2: when a speaker's utterance.v1 names `next_speaker`,
+    the engine follows it instead of the legacy role chain.
+
+    Setup: planner emits utterance.v1 with `next_speaker=verifier_functional`,
+    so the engine must skip the builder step entirely. verifier_functional and
+    verifier_human then proceed as normal, and orchestrator closes the cycle.
+    """
+    target = sandbox / "utt-next-speaker"
+    _init_project(target)
+    adapters = _install_scripted_adapters(
+        [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "planner": {"next_speaker": "verifier_functional"},
+                },
+            }
+        ]
+    )
+    rc = _run_cycle(target)
+    if rc != 0:
+        return ScenarioResult(
+            "utterance_next_speaker_skips_legacy_chain", False, f"run_cycle rc={rc}"
+        )
+    if adapters["builder"].invocations:
+        return ScenarioResult(
+            "utterance_next_speaker_skips_legacy_chain",
+            False,
+            "builder was invoked despite planner routing past it",
+        )
+    for required in ("planner", "verifier_functional", "verifier_human", "orchestrator"):
+        if not adapters[required].invocations:
+            return ScenarioResult(
+                "utterance_next_speaker_skips_legacy_chain",
+                False,
+                f"{required} was not invoked (utterance routing broken)",
+            )
+    session = _read_session(target)
+    if session.get("state") != "completed":
+        return ScenarioResult(
+            "utterance_next_speaker_skips_legacy_chain",
+            False,
+            f"state={session.get('state')} != completed",
+        )
+    return ScenarioResult(
+        "utterance_next_speaker_skips_legacy_chain",
+        True,
+        "planner.next_speaker=verifier_functional skipped the builder step",
+    )
+
+
+def _scenario_declare_done_forces_orchestrator(sandbox: Path) -> ScenarioResult:
+    """Phase 2 D5 rule #1: declare_done=true forces an immediate orchestrator
+    call, regardless of the named next_speaker.
+
+    Setup: builder returns utterance.v1 with `declare_done=true` and a
+    deliberately wrong `next_speaker=verifier_functional`. The engine must
+    ignore that and jump straight to orchestrator, skipping both verifiers.
+    """
+    target = sandbox / "declare-done"
+    _init_project(target)
+    adapters = _install_scripted_adapters(
+        [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "builder": {
+                        "declare_done": True,
+                        "next_speaker": "verifier_functional",
+                    },
+                },
+            }
+        ]
+    )
+    rc = _run_cycle(target)
+    if rc != 0:
+        return ScenarioResult(
+            "declare_done_forces_orchestrator", False, f"run_cycle rc={rc}"
+        )
+    if adapters["verifier_functional"].invocations:
+        return ScenarioResult(
+            "declare_done_forces_orchestrator",
+            False,
+            "verifier_functional invoked despite declare_done forcing orchestrator",
+        )
+    if adapters["verifier_human"].invocations:
+        return ScenarioResult(
+            "declare_done_forces_orchestrator",
+            False,
+            "verifier_human invoked despite declare_done forcing orchestrator",
+        )
+    if not adapters["orchestrator"].invocations:
+        return ScenarioResult(
+            "declare_done_forces_orchestrator",
+            False,
+            "orchestrator was not invoked after declare_done",
+        )
+    session = _read_session(target)
+    if session.get("state") != "completed":
+        return ScenarioResult(
+            "declare_done_forces_orchestrator",
+            False,
+            f"state={session.get('state')} != completed",
+        )
+    return ScenarioResult(
+        "declare_done_forces_orchestrator",
+        True,
+        "builder.declare_done=true routed straight to orchestrator (verifiers skipped)",
+    )
+
+
+def _scenario_max_utterances_blocks_session(sandbox: Path) -> ScenarioResult:
+    """Safety net: if the free-utterance loop exceeds _MAX_UTTERANCES_PER_CYCLE
+    without reaching the orchestrator, the engine must leave the session in a
+    RESUMABLE state (blocked), not mid-flight (planning/building). Otherwise
+    the next run-cycle would be rejected by RESUMABLE_STATES and the project
+    would deadlock.
+
+    Setup: planner and builder ping-pong forever via utterance.next_speaker.
+    The loop cap (12) should fire and session.state should end up 'blocked'
+    with last_decision='cycle_max_utterances_exceeded'.
+    """
+    target = sandbox / "max-utterances"
+    _init_project(target)
+    _install_scripted_adapters(
+        [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "planner": {"next_speaker": "builder"},
+                    "builder": {"next_speaker": "planner"},
+                },
+            }
+        ]
+    )
+    rc = _run_cycle(target)
+    if rc != 2:
+        return ScenarioResult(
+            "max_utterances_blocks_session",
+            False,
+            f"expected rc=2 after loop cap, got rc={rc}",
+        )
+    session = _read_session(target)
+    if session.get("state") != "blocked":
+        return ScenarioResult(
+            "max_utterances_blocks_session",
+            False,
+            f"state={session.get('state')} != blocked (would deadlock next run-cycle)",
+        )
+    if session.get("last_decision") != "cycle_max_utterances_exceeded":
+        return ScenarioResult(
+            "max_utterances_blocks_session",
+            False,
+            f"last_decision={session.get('last_decision')} != cycle_max_utterances_exceeded",
+        )
+    return ScenarioResult(
+        "max_utterances_blocks_session",
+        True,
+        "loop cap tripped, session transitioned to blocked (resumable guard)",
+    )
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
     "handoff_mode_pauses_cycle": _scenario_handoff_mode_pauses_cycle,
     "handoff_feedback_reaches_planner": _scenario_handoff_feedback_reaches_planner,
     "terminal_handoff_clears_feedback": _scenario_terminal_handoff_clears_feedback,
+    "utterance_next_speaker_skips_legacy_chain": _scenario_utterance_next_speaker_skips_legacy_chain,
+    "declare_done_forces_orchestrator": _scenario_declare_done_forces_orchestrator,
+    "max_utterances_blocks_session": _scenario_max_utterances_blocks_session,
 }
 
 

@@ -1,16 +1,16 @@
-"""Arbitration / next-speaker routing smoke (Phase 2 D5 skeleton).
+"""Arbitration / next-speaker routing smoke.
 
-Phase 2 final form (D5) will route the next speaker from a free
-`next_speaker` field plus a `declare_done → orchestrator forced call`
-rule. Today's engine still uses the legacy orchestrator decision enum
-(`complete_cycle` / `needs_iteration` / `blocked`) to pick the next
-speaker for timeline bookkeeping. These scenarios lock in the current
-mapping so the later free-utterance cutover has a clear before/after.
+These scenarios lock in the orchestrator's timeline-side next_speaker
+mapping from the legacy decision enum (`complete_cycle` / `needs_iteration`
+/ `blocked`). Even after the Phase 2 P1-5-B free-utterance loop landed,
+the orchestrator's legacy decision is still what `_append_orchestrator_timeline`
+uses to populate `next_speaker` in its timeline entry, so this smoke
+remains the canonical guard against accidental regressions in that mapping.
 
-Scenarios (legacy-decision era, current):
+Scenarios:
 
-  1. orchestrator_decision_maps_to_next_speaker — three decisions map
-     to the expected timeline next_speaker:
+  1. orchestrator_decision_maps_to_next_speaker — three decisions map to
+     the expected timeline next_speaker:
        complete_cycle → __end__
        needs_iteration → planner
        blocked → __end__
@@ -18,10 +18,17 @@ Scenarios (legacy-decision era, current):
      emitted with an empty / unknown decision (e.g. legacy bug path),
      the timeline routing falls back to 'planner' rather than crashing.
 
-TODO (Phase 2 D5, next session):
-  - declare_done=True forces orchestrator call (engine rule).
-  - arbitration=agree + next_speaker=__end__ ends session.
-  - arbitration=disagree resumes with named next_speaker.
+The actual run_cycle-level free-utterance routing (D5 rules: follow
+utterance.next_speaker, force orchestrator on declare_done) is covered
+by cycle_e2e_smoke scenarios `utterance_next_speaker_skips_legacy_chain`
+and `declare_done_forces_orchestrator`.
+
+TODO (future):
+  - arbitration=agree + next_speaker=__end__ ends session (currently
+    "orchestrator decision = cycle end" covers this implicitly).
+  - arbitration=disagree resumes with named next_speaker in the SAME
+    cycle (engine currently terminates the cycle after orchestrator
+    runs; disagree-reopen would require run_cycle to resume the loop).
 """
 
 from __future__ import annotations

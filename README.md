@@ -77,16 +77,20 @@ python -m core.app handoff-cancel  --target "..."
 ```
 === 사이클 1 시작 (이전 상태=idle) ===
 목표: ...
-[사이클 1] [1/4] planner (claude_cli) ... 시작
-[사이클 1] [1/4] planner (claude_cli) 완료 6.9s | task=...
-[사이클 1] [2/4] builder (claude_cli) ... 시작
-[사이클 1] [2/4] builder (claude_cli) 완료 12.6s
-[사이클 1] [3/4] verifier_functional (codex_cli) ... 시작
-[사이클 1] [3/4] verifier_functional (codex_cli) 완료 23.0s | result=pass score=1.00
-[사이클 1] [4/4] verifier_human (codex_cli) ... 시작
-[사이클 1] [4/4] verifier_human (codex_cli) 완료 32.1s | result=pass score=1.00
+[사이클 1] [1/12] planner (claude_cli) ... 시작
+[사이클 1] [1/12] planner (claude_cli) 완료 6.9s | task=...
+[사이클 1] [2/12] builder (claude_cli) ... 시작
+[사이클 1] [2/12] builder (claude_cli) 완료 12.6s
+[사이클 1] [3/12] verifier_functional (codex_cli) ... 시작
+[사이클 1] [3/12] verifier_functional (codex_cli) 완료 23.0s | result=pass score=1.00
+[사이클 1] [4/12] verifier_human (codex_cli) ... 시작
+[사이클 1] [4/12] verifier_human (codex_cli) 완료 32.1s | result=pass score=1.00
+[사이클 1] [5/12] orchestrator (codex_cli) ... 시작
+[사이클 1] [5/12] orchestrator (codex_cli) 완료 4.2s | decision=complete_cycle
 === 사이클 1 완료: 결정=complete_cycle 다음 상태=completed ===
 ```
+
+단계 수 `[N/12]` 의 분모는 하드코딩된 단계 총량이 아니라 **한 사이클 안의 최대 발화 수 상한** 입니다 (Phase 2 P1-5-B 부터). 엔진은 `next_speaker` 지명과 `declare_done → orchestrator 강제 호출` 두 규칙만 따라 다음 화자를 고르며, legacy 체인(planner → builder → verifier_f → verifier_h → orchestrator) 은 adapter 가 utterance.v1 메타를 반환하지 않았을 때의 fallback 입니다.
 
 ---
 
@@ -94,19 +98,23 @@ python -m core.app handoff-cancel  --target "..."
 
 ```
 idle → planning → building → verifying_functional → verifying_human →
+  orchestrator →
   { complete_cycle → completed
-  | needs_iteration → iterating → (다시 planning)
+  | needs_iteration → iterating → (다음 run-cycle 에서 다시 planning)
   | blocked }
 
-verifier_human이 handoff 모드면:
+verifier_human 이 handoff 모드면:
   ... → verifying_functional → handoff_active → (외부 도구가 응답 작성) →
         handoff-ingest → 결과에 따라 completed / iterating / blocked
 ```
 
+위 체인은 legacy fallback 순서입니다. Phase 2 P1-5-B 부터 엔진은 각 화자의 utterance.v1 이 지정한 `next_speaker` 를 우선 따르며, `declare_done=true` 선언 직후에는 orchestrator 를 강제 호출합니다. 화자 전환 규칙은 그 두 가지뿐이고, 나머지는 LLM 자율 판단.
+
 주요 정책:
 
 - `RESUMABLE_STATES = {idle, iterating, completed}`: 이 상태에서만 새 사이클 진입 허용
-- 사이클 종료 판정은 orchestrator LLM 단일 책임 (Phase 2 P1-5부터 규칙 기반 `max_cycles` / `stop_on_stagnation` escalation 제거)
+- 사이클 종료 판정은 orchestrator LLM 단일 책임 (Phase 2 P1-5-A 부터 규칙 기반 `max_cycles` / `stop_on_stagnation` escalation 제거)
+- 한 사이클 안의 최대 발화 수 `_MAX_UTTERANCES_PER_CYCLE = 12` (무한 루프 방지용 안전망)
 - `handoff_pause_count`: 세션이 handoff 로 일시정지한 횟수 (세션 텔레메트리용 누적 메트릭)
 - handoff 응답의 `findings` / `recommended_next_action`은 다음 iterating 사이클의 planner context에 자동 주입
 

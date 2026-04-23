@@ -37,6 +37,21 @@ from core.state_machine import EngineState, RESUMABLE_STATES
 ENGINE_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_ROOT = ENGINE_ROOT / "templates" / "target_project" / ".orch"
 
+# Phase 2 D1/D2/D5 free-utterance routing — fallback chain used when the
+# adapter returned a legacy role payload without utterance.next_speaker.
+# (ScriptedAdapter tests, early LLM outputs that do not yet emit utterance.v1.)
+_LEGACY_SPEAKER_CHAIN = {
+    "planner": "builder",
+    "builder": "verifier_functional",
+    "verifier_functional": "verifier_human",
+    "verifier_human": "orchestrator",
+}
+
+# Safety cap on utterances per cycle. With the legacy chain a cycle uses
+# 5 utterances; `declare_done` re-routing can add a couple more. 12 leaves
+# headroom while still breaking out of pathological loops.
+_MAX_UTTERANCES_PER_CYCLE = 12
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="orch-engine scaffold entry")
@@ -303,96 +318,66 @@ def run_cycle(args: argparse.Namespace) -> int:
         paths_preview = ", ".join(a["path"] for a in existing_artifacts[:3])
         extra = f" 외 {len(existing_artifacts) - 3}건" if len(existing_artifacts) > 3 else ""
         print(f"기존 산출물 {len(existing_artifacts)}건 증분 수정 대상: {paths_preview}{extra}", flush=True)
-    planner_adapter = str(roles_config.get("planner", "claude_cli"))
-    step_ctx = _log_step_start(cycle_index, 1, 4, "planner", planner_adapter)
-    try:
-        task = _run_planner(
-            target_root=target_root,
-            runtime=runtime,
-            artifacts=artifacts,
-            roles_config=roles_config,
-            project_goal=project_goal,
-            cycle_index=cycle_index,
-            previous_state=previous_state,
-            existing_artifacts=existing_artifacts,
-        )
-    except (AdapterFatalError, AdapterExecutionError) as exc:
-        _log_step_end(
-            cycle_index, 1, 4, "planner", planner_adapter, step_ctx,
-            detail=f"실패: {type(exc).__name__}",
-        )
-        _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
-        if isinstance(exc, AdapterQuotaExceededError):
-            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
-            print(f"사이클 {cycle_index} 중단 (quota 고갈): {exc}")
-            return 3
-        print(f"사이클 {cycle_index} 중단 (adapter 실패): {exc}")
-        return 2
-    _log_step_end(
-        cycle_index, 1, 4, "planner", planner_adapter, step_ctx,
-        detail=f"task={(task or {}).get('title', 'none')}",
-    )
-    if task is None:
-        runtime.write_json(
-            "runtime/session.json",
-            {
-                **runtime.read_json("runtime/session.json", {}),
-                "state": EngineState.BLOCKED.value,
-                "active_role": None,
-                "cycle": cycle_index,
-                "last_decision": "no_work",
-                "last_decision_reason": "planner returned no tasks and backlog is empty",
-            },
-        )
-        runtime.append_event("cycle_blocked_no_work", {"cycle": cycle_index})
-        print(f"사이클 {cycle_index} 중단: planner가 실행할 task를 반환하지 않았습니다.")
-        return 2
-    builder_adapter = str(roles_config.get("builder", "claude_cli"))
-    vf_adapter = str(roles_config.get("verifier_functional", "codex_cli"))
-    vh_adapter = str(roles_config.get("verifier_human", "codex_app"))
-    try:
-        step_ctx = _log_step_start(cycle_index, 2, 4, "builder", builder_adapter)
-        _run_builder(
-            target_root=target_root,
-            runtime=runtime,
-            artifacts=artifacts,
-            roles_config=roles_config,
-            task=task,
-            cycle_index=cycle_index,
-            existing_artifacts=existing_artifacts,
-        )
-        _log_step_end(cycle_index, 2, 4, "builder", builder_adapter, step_ctx)
-        step_ctx = _log_step_start(cycle_index, 3, 4, "verifier_functional", vf_adapter)
-        functional_review = _run_verifier(
-            target_root=target_root,
-            runtime=runtime,
-            artifacts=artifacts,
-            roles_config=roles_config,
-            task=task,
-            role="verifier_functional",
-            state=EngineState.VERIFYING_FUNCTIONAL,
-            cycle_index=cycle_index,
-        )
-        _log_step_end(
-            cycle_index, 3, 4, "verifier_functional", vf_adapter, step_ctx,
-            detail=(
-                f"result={functional_review.get('result')} "
-                f"score={_fmt_score(functional_review.get('score'))}"
-            ),
-        )
-        if _human_review_mode(workflow_config) == "handoff":
-            step_ctx = _log_step_start(cycle_index, 4, 4, "verifier_human", "handoff")
+    # Phase 2 D1/D2/D5 — free-utterance dispatch loop.
+    # Engine rules are just two: follow `next_speaker`, and force an
+    # orchestrator call right after any `declare_done=true`. When the LLM
+    # returns a legacy payload without utterance metadata, fall back to the
+    # fixed role chain (planner → builder → verifier_f → verifier_h →
+    # orchestrator) so smokes with ScriptedAdapters keep working.
+    loop_state: dict[str, object] = {
+        "task": None,
+        "functional_review": None,
+        "human_review": None,
+        "decision": None,
+    }
+    speaker = "planner"
+    step_no = 0
+    while True:
+        step_no += 1
+        if step_no > _MAX_UTTERANCES_PER_CYCLE:
+            runtime.write_json(
+                "runtime/session.json",
+                {
+                    **runtime.read_json("runtime/session.json", {}),
+                    "state": EngineState.BLOCKED.value,
+                    "active_role": None,
+                    "cycle": cycle_index,
+                    "last_decision": "cycle_max_utterances_exceeded",
+                    "last_decision_reason": (
+                        f"최대 발화 수 {_MAX_UTTERANCES_PER_CYCLE} 초과, "
+                        f"마지막 speaker={speaker}"
+                    ),
+                },
+            )
+            runtime.append_event(
+                "cycle_max_utterances_exceeded",
+                {"cycle": cycle_index, "last_speaker": speaker},
+            )
+            print(
+                f"사이클 {cycle_index} 중단: 최대 발화 수 {_MAX_UTTERANCES_PER_CYCLE} 초과 "
+                f"(마지막 speaker={speaker}, orchestrator 결정 전 종료)."
+            )
+            return 2
+        if speaker == "__end__":
+            break
+
+        # verifier_human 진입 시 handoff 모드면 adapter 호출 대신 pause.
+        if speaker == "verifier_human" and _human_review_mode(workflow_config) == "handoff":
+            step_ctx = _log_step_start(
+                cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, "verifier_human", "handoff"
+            )
             handoff_status = _pause_for_human_handoff(
                 target_root=target_root,
                 runtime=runtime,
                 orch_root=orch_root,
                 project_config=project_config,
-                task=task,
+                task=loop_state["task"] or {},
                 cycle_index=cycle_index,
-                functional_review=functional_review,
+                functional_review=loop_state["functional_review"] or {},
             )
             _log_step_end(
-                cycle_index, 4, 4, "verifier_human", "handoff", step_ctx,
+                cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, "verifier_human", "handoff",
+                step_ctx,
                 detail=f"일시정지, handoff_id={handoff_status.handoff_id}",
             )
             print(
@@ -400,73 +385,225 @@ def run_cycle(args: argparse.Namespace) -> int:
                 f".orch/handoff/response.yaml을 채운 뒤 "
                 f"`python -m core.app handoff-ingest --target {target_root}` 실행."
             )
-            # 스크립트가 `사이클 .* (완료|일시정지)` 로 grep할 수 있도록
-            # 완료 마커와 대칭되는 한 줄을 일시정지 분기에도 출력한다.
             print(
                 f"=== 사이클 {cycle_index} 일시정지: "
                 f"결정=handoff_requested 다음 상태={EngineState.HANDOFF_ACTIVE.value} ===",
                 flush=True,
             )
             return 0
-        step_ctx = _log_step_start(cycle_index, 4, 4, "verifier_human", vh_adapter)
-        human_review = _run_verifier(
-            target_root=target_root,
-            runtime=runtime,
-            artifacts=artifacts,
-            roles_config=roles_config,
-            task=task,
-            role="verifier_human",
-            state=EngineState.VERIFYING_HUMAN,
-            cycle_index=cycle_index,
+
+        adapter_name = str(roles_config.get(speaker, "unknown"))
+        step_ctx = _log_step_start(
+            cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name
         )
-        _log_step_end(
-            cycle_index, 4, 4, "verifier_human", vh_adapter, step_ctx,
-            detail=(
-                f"result={human_review.get('result')} "
-                f"score={_fmt_score(human_review.get('score'))}"
-            ),
+        utt: dict[str, object] | None = None
+        try:
+            if speaker == "planner":
+                task, utt = _run_planner(
+                    target_root=target_root,
+                    runtime=runtime,
+                    artifacts=artifacts,
+                    roles_config=roles_config,
+                    project_goal=project_goal,
+                    cycle_index=cycle_index,
+                    previous_state=previous_state,
+                    existing_artifacts=existing_artifacts,
+                )
+                loop_state["task"] = task
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                    detail=f"task={(task or {}).get('title', 'none')}",
+                )
+                if task is None:
+                    runtime.write_json(
+                        "runtime/session.json",
+                        {
+                            **runtime.read_json("runtime/session.json", {}),
+                            "state": EngineState.BLOCKED.value,
+                            "active_role": None,
+                            "cycle": cycle_index,
+                            "last_decision": "no_work",
+                            "last_decision_reason": "planner returned no tasks and backlog is empty",
+                        },
+                    )
+                    runtime.append_event("cycle_blocked_no_work", {"cycle": cycle_index})
+                    print(
+                        f"사이클 {cycle_index} 중단: planner가 실행할 task를 반환하지 않았습니다."
+                    )
+                    return 2
+            elif speaker == "builder":
+                if loop_state["task"] is None:
+                    raise AdapterExecutionError(
+                        "builder 발화 요청되었으나 planner 가 아직 task 를 내지 않았습니다."
+                    )
+                utt = _run_builder(
+                    target_root=target_root,
+                    runtime=runtime,
+                    artifacts=artifacts,
+                    roles_config=roles_config,
+                    task=loop_state["task"],
+                    cycle_index=cycle_index,
+                    existing_artifacts=existing_artifacts,
+                )
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                )
+            elif speaker == "verifier_functional":
+                if loop_state["task"] is None:
+                    raise AdapterExecutionError(
+                        "verifier_functional 발화 요청되었으나 task 가 없습니다."
+                    )
+                review, utt = _run_verifier(
+                    target_root=target_root,
+                    runtime=runtime,
+                    artifacts=artifacts,
+                    roles_config=roles_config,
+                    task=loop_state["task"],
+                    role="verifier_functional",
+                    state=EngineState.VERIFYING_FUNCTIONAL,
+                    cycle_index=cycle_index,
+                )
+                loop_state["functional_review"] = review
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                    detail=(
+                        f"result={review.get('result')} "
+                        f"score={_fmt_score(review.get('score'))}"
+                    ),
+                )
+            elif speaker == "verifier_human":
+                if loop_state["task"] is None:
+                    raise AdapterExecutionError(
+                        "verifier_human 발화 요청되었으나 task 가 없습니다."
+                    )
+                review, utt = _run_verifier(
+                    target_root=target_root,
+                    runtime=runtime,
+                    artifacts=artifacts,
+                    roles_config=roles_config,
+                    task=loop_state["task"],
+                    role="verifier_human",
+                    state=EngineState.VERIFYING_HUMAN,
+                    cycle_index=cycle_index,
+                )
+                loop_state["human_review"] = review
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                    detail=(
+                        f"result={review.get('result')} "
+                        f"score={_fmt_score(review.get('score'))}"
+                    ),
+                )
+            elif speaker == "orchestrator":
+                refreshed_session = runtime.read_json("runtime/session.json", {})
+                score_history = _score_history(refreshed_session)
+                decision, utt = _run_orchestrator(
+                    target_root=target_root,
+                    runtime=runtime,
+                    roles_config=roles_config,
+                    task=loop_state["task"] or {},
+                    functional_review=loop_state["functional_review"] or {},
+                    human_review=loop_state["human_review"] or {},
+                    cycle_index=cycle_index,
+                    score_history=score_history,
+                    previous_state=previous_state,
+                    project_goal=project_goal,
+                )
+                loop_state["decision"] = decision
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                    detail=f"decision={decision.get('decision')}",
+                )
+            else:
+                # Unknown speaker — let the except block below emit the single
+                # _log_step_end so stdout stays clean (avoids the duplicate
+                # "완료 X.Xs" line that would otherwise appear from calling
+                # _log_step_end here + again in the catch block).
+                raise AdapterExecutionError(f"알 수 없는 speaker 지명: {speaker!r}")
+        except (AdapterFatalError, AdapterExecutionError) as exc:
+            # step_ctx 아직 끝나지 않은 경우 대비: _log_step_end 가 이미 호출된 분기
+            # (예: orchestrator decision 에러) 에서도 heartbeat 가 중복 종료되지 않도록,
+            # try 블록 안에서 각 분기가 자신의 _log_step_end 를 먼저 찍도록 맞췄다.
+            # 예외는 그 뒤에 던져지므로 여기서는 heartbeat 흔적만 남지 않게 한 번 더 호출.
+            try:
+                _log_step_end(
+                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    step_ctx,
+                    detail=f"실패: {type(exc).__name__}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
+            if isinstance(exc, AdapterQuotaExceededError):
+                _maybe_auto_wait_for_quota(
+                    target_root=target_root, limits_config=limits_config, exc=exc
+                )
+                print(f"사이클 {cycle_index} 중단 (quota 고갈, {speaker} 단계): {exc}")
+                return 3
+            print(f"사이클 {cycle_index} 중단 (adapter 실패, {speaker} 단계): {exc}")
+            return 2
+
+        # Routing rule #1: declare_done → force orchestrator call.
+        if speaker != "orchestrator" and utt and utt.get("declare_done"):
+            speaker = "orchestrator"
+            continue
+
+        # orchestrator 가 한 번이라도 decision 을 냈다면 이 cycle 은 종료.
+        # (Phase 2 완전판에서는 arbitration=disagree 시 재개도 가능하지만, 본 단계는
+        #  "orchestrator 결정 = cycle 종료" 를 유지해 finalize/state 전환을 단순화.)
+        if speaker == "orchestrator":
+            break
+
+        # Routing rule #2: follow utterance.next_speaker; else legacy chain.
+        next_sp: str | None = None
+        if utt and utt.get("next_speaker"):
+            next_sp = str(utt["next_speaker"])
+        else:
+            next_sp = _LEGACY_SPEAKER_CHAIN.get(speaker)
+        if next_sp is None:
+            raise AdapterExecutionError(
+                f"{speaker} 이후 next_speaker 를 결정할 수 없습니다 "
+                f"(utterance 없음 + legacy chain 종점). 루프 설계 오류 가능성."
+            )
+        speaker = next_sp
+
+    if loop_state["decision"] is None:
+        runtime.write_json(
+            "runtime/session.json",
+            {
+                **runtime.read_json("runtime/session.json", {}),
+                "state": EngineState.BLOCKED.value,
+                "active_role": None,
+                "cycle": cycle_index,
+                "last_decision": "cycle_ended_without_orchestrator",
+                "last_decision_reason": (
+                    f"루프가 __end__ 로 조기 종료되어 orchestrator 판정 없음 "
+                    f"(마지막 speaker={speaker})"
+                ),
+            },
         )
-    except (AdapterFatalError, AdapterExecutionError) as exc:
-        _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
-        if isinstance(exc, AdapterQuotaExceededError):
-            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
-            print(f"사이클 {cycle_index} 중단 (quota 고갈): {exc}")
-            return 3
-        print(f"사이클 {cycle_index} 중단 (adapter 실패): {exc}")
+        runtime.append_event(
+            "cycle_ended_without_orchestrator",
+            {"cycle": cycle_index, "last_speaker": speaker},
+        )
+        print(f"사이클 {cycle_index} 중단: orchestrator 호출 없이 루프 종료 (__end__).")
         return 2
 
-    refreshed_session = runtime.read_json("runtime/session.json", {})
-    score_history = _score_history(refreshed_session)
-    try:
-        decision = _run_orchestrator(
-            target_root=target_root,
-            runtime=runtime,
-            roles_config=roles_config,
-            task=task,
-            functional_review=functional_review,
-            human_review=human_review,
-            cycle_index=cycle_index,
-            score_history=score_history,
-            previous_state=previous_state,
-            project_goal=project_goal,
-        )
-    except (AdapterFatalError, AdapterExecutionError) as exc:
-        _finalize_adapter_failure(target_root, runtime, cycle_index, exc)
-        if isinstance(exc, AdapterQuotaExceededError):
-            _maybe_auto_wait_for_quota(target_root=target_root, limits_config=limits_config, exc=exc)
-            print(f"사이클 {cycle_index} 중단 (quota 고갈, orchestrator 단계): {exc}")
-            return 3
-        print(f"사이클 {cycle_index} 중단 (orchestrator LLM 실패): {exc}")
-        return 2
+    decision = loop_state["decision"]
     _finalize_cycle(
         target_root=target_root,
         runtime=runtime,
-        task=task,
+        task=loop_state["task"] or {},
         decision=decision,
         cycle_index=cycle_index,
         dispatcher=dispatcher,
-        functional_review=functional_review,
-        human_review=human_review,
+        functional_review=loop_state["functional_review"],
+        human_review=loop_state["human_review"],
     )
 
     print(
@@ -1008,7 +1145,13 @@ def _run_planner(
     cycle_index: int,
     previous_state: str = EngineState.IDLE.value,
     existing_artifacts: list[dict[str, str]] | None = None,
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """Return (active_task or None, utterance_meta or None).
+
+    utterance_meta (Phase 2 D4/D5) is the routing metadata stashed by the
+    adapter when the LLM returned a utterance.v1 shape. None means legacy
+    payload — run_cycle falls back to the fixed role chain.
+    """
     runtime.write_json(
         "runtime/session.json",
         {
@@ -1106,8 +1249,8 @@ def _run_planner(
             "planner_returned_no_tasks",
             {"cycle": cycle_index, "summary": result.summary},
         )
-        return None
-    return active_task
+        return None, result.utterance
+    return active_task, result.utterance
 
 
 def _stringify_findings(items: object) -> list[str]:
@@ -1229,7 +1372,8 @@ def _run_builder(
     task: dict[str, object],
     cycle_index: int,
     existing_artifacts: list[dict[str, str]] | None = None,
-) -> None:
+) -> dict[str, object] | None:
+    """Return utterance_meta if the builder used utterance.v1, else None."""
     runtime.write_json(
         "runtime/session.json",
         {
@@ -1310,6 +1454,7 @@ def _run_builder(
         unresolved=unresolved,
         provider_id=roles_config.get("builder", "unknown"),
     )
+    return result.utterance
 
 
 def _run_verifier(
@@ -1322,7 +1467,8 @@ def _run_verifier(
     role: str,
     state: EngineState,
     cycle_index: int,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Return (review_payload, utterance_meta or None)."""
     runtime.write_json(
         "runtime/session.json",
         {
@@ -1398,7 +1544,7 @@ def _run_verifier(
             suggested_actions=suggested_actions,
             provider_id=provider_id,
         )
-    return review_payload
+    return review_payload, result.utterance
 
 
 def _score_history(session: dict[str, object]) -> list[dict[str, object]]:
@@ -1427,7 +1573,7 @@ def _run_orchestrator(
     score_history: list[dict[str, object]],
     previous_state: str,
     project_goal: str,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object] | None]:
     """Invoke the Orchestrator LLM to judge this cycle's outcome.
 
     The orchestrator decides complete_cycle / needs_iteration / blocked by
@@ -1499,7 +1645,7 @@ def _run_orchestrator(
         recommended_next_action=normalized["recommended_next_action"],
         provider_id=str(roles_config.get("orchestrator", "unknown")),
     )
-    return normalized
+    return normalized, result.utterance
 
 
 def _finalize_cycle(

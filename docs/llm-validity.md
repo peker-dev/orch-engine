@@ -70,6 +70,6 @@ python -m tools.llm_validity_smoke --live --provider codex --confirm-cost --only
 - `_live_response` 는 현재 adapter import 만 되어 있고 invoke 경로가 간단한
   placeholder. 프롬프트를 context 필드로 직접 넣는 구조 — 실제 verifier 포맷
   (invocation schema 맞춰 domain 팩 rubric 주입) 과 정합이 필요하면 엔진의
-  `_run_verifier_role` 내부 로직을 참조해 프롬프트 구성 세부를 교체할 것.
+  `_run_verifier` 내부 로직을 참조해 프롬프트 구성 세부를 교체할 것.
 - dry-run 통과 == 포맷이 올바르다. 실제 LLM 판단력 증거는 `--live` 결과를
   `counter_examples/` 혹은 `human_judgments/` 로 축적해 교차 검증.
