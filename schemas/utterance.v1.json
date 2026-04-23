@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://peker-dev.github.io/orch-engine/schemas/utterance.v1.json",
+  "title": "Utterance v1",
+  "description": "Phase 2 자율 재설계 D4: 에이전트 간 단일 발화 포맷. 본문(body)은 자연어 markdown 자유 서술이고, 나머지 필드는 엔진 라우팅용 최소 메타. Phase 1 의 summary/reasoning/findings/suggestions/unresolved_items/score/decision/next_state 는 전부 body 에 녹여 폐기.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["speaker", "body", "next_speaker"],
+  "properties": {
+    "speaker": {
+      "description": "이 발화의 화자 역할 id. domains/<domain>/roles.yaml 에 선언된 id 중 하나. 예: planner, builder, verifier_functional, verifier_human, orchestrator, 또는 도메인에서 정의한 커스텀 역할.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "body": {
+      "description": "자연어 markdown 자유 서술. 관찰·판단·제안·질문 등 모든 내용은 여기에 담는다. 구조화 서브필드 없음. 엔진은 body 내부를 파싱하지 않는다.",
+      "type": "string",
+      "minLength": 1
+    },
+    "next_speaker": {
+      "description": "다음 발화를 요청하는 화자 역할 id. 자유 지명 (엔진 강제 라우팅 룰은 declare_done=true 직후 orchestrator 호출 하나뿐 — D5). 세션 종료 의사는 declare_done 으로 표현하고, next_speaker 는 그때도 후속 중재자(orchestrator)를 지명한다.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "declare_done": {
+      "description": "true 이면 '이 관점에서는 목표 달성 완료'로 선언. 엔진은 즉시 orchestrator 를 강제 호출해 중재(agree/disagree)를 받는다. 미지정시 false 로 간주.",
+      "type": "boolean",
+      "default": false
+    },
+    "arbitration": {
+      "description": "orchestrator 가 declare_done 에 대해 내리는 중재 결과. agree=세션 종료 후보, disagree=next_speaker 지명으로 재개, null/미지정=중재 발화가 아님(일반 발화).",
+      "type": ["string", "null"],
+      "enum": ["agree", "disagree", null]
+    },
+    "artifacts_snapshot": {
+      "description": "이 발화 시점에 화자가 관찰한 산출물 상태의 식별자 맵. stale 관점 감지(D7-b)용. key=artifact 경로 또는 논리명, value=content hash / mtime / version 등 엔진이 비교 가능한 식별자.",
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number"]
+      }
+    },
+    "artifacts_seen_snapshot": {
+      "description": "화자가 이 발화를 작성하기 전까지 실제로 읽거나 참조한 산출물의 식별자 맵. artifacts_snapshot 과 불일치하면 stale 판정 후보. 포맷은 artifacts_snapshot 과 동일.",
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "number"]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "arbitration 필드는 speaker 가 orchestrator 이고 직전 발화가 declare_done=true 일 때만 의미가 있다. 스키마는 값 enum 까지만 검증; 호출 컨텍스트 검증은 엔진이 담당.",
+      "if": {
+        "properties": {
+          "arbitration": {
+            "type": "string"
+          }
+        },
+        "required": ["arbitration"]
+      },
+      "then": {
+        "properties": {
+          "speaker": {
+            "const": "orchestrator"
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "speaker": "planner",
+      "body": "홈 화면의 hero 섹션 카피가 아직 임시 문구(lorem ipsum)로 남아 있어요. 먼저 builder 에게 실제 카피 초안을 요청하는 게 좋겠습니다. 브랜드 톤은 domain guide 의 'warm, confident' 기조를 유지해주세요.",
+      "next_speaker": "builder",
+      "artifacts_snapshot": {
+        "index.html": "sha256:ab12...",
+        "styles.css": "sha256:cd34..."
+      },
+      "artifacts_seen_snapshot": {
+        "index.html": "sha256:ab12...",
+        "styles.css": "sha256:cd34..."
+      }
+    },
+    {
+      "speaker": "verifier_functional",
+      "body": "hero 카피 초안이 들어왔고 문법·링크 동작 확인했습니다. 다만 CTA 버튼 텍스트가 여전히 'Click here' 로 비어있는 문제는 남아 있어요. 나머지는 통과. 제 관점에서는 아직 완료 아닙니다.",
+      "next_speaker": "builder",
+      "declare_done": false,
+      "artifacts_snapshot": {
+        "index.html": "sha256:ef56..."
+      },
+      "artifacts_seen_snapshot": {
+        "index.html": "sha256:ef56..."
+      }
+    },
+    {
+      "speaker": "verifier_human",
+      "body": "읽는 사람 입장에서 자연스럽고 CTA 도 기대를 자극합니다. 제 관점에서는 완료로 선언합니다.",
+      "next_speaker": "orchestrator",
+      "declare_done": true
+    },
+    {
+      "speaker": "orchestrator",
+      "body": "verifier_human 은 완료 선언, verifier_functional 은 직전 발화에서 CTA 미해결을 지적. 두 관점이 엇갈리므로 disagree 판정합니다. builder 가 CTA 문구를 교체한 뒤 재발화해주세요.",
+      "next_speaker": "builder",
+      "arbitration": "disagree"
+    }
+  ]
+}
