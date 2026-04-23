@@ -93,18 +93,16 @@ live probe로 확인 완료한 사실:
 모든 provider는 마지막 응답을 **마크다운 없이 JSON 객체 하나**로 반환해야 합니다.
 
 공통 원칙:
-- 불필요한 설명 금지
-- fenced code block 금지
-- schema에 없는 필드 남발 금지
-- 확신이 낮더라도 유효한 JSON을 우선 반환
+- 바깥 envelope 에 fenced code block 금지 (utterance.v1 의 outer JSON 은 plain)
+- body 내부에서는 markdown + 정확히 하나의 fenced ```json``` 블록 허용 (P1-5-C 부터)
+- 확신이 낮더라도 유효한 JSON 을 우선 반환
 
-역할별 schema 파일:
-- `schemas/roles/planner.result.v1.json`
-- `schemas/roles/builder.result.v1.json`
-- `schemas/roles/verifier_functional.result.v1.json`
-- `schemas/roles/verifier_human.result.v1.json`
+공통 스키마:
+- `schemas/utterance.v1.json` — 모든 역할의 wire 포맷 (P1-5-C 부터 단일 스키마)
+- 각 역할의 구조화 데이터는 body 내부 fenced JSON 블록에서 엔진이 추출
+  (`adapters/base.py._coerce_<role>_utterance_to_legacy`)
 
-현재 코드와 직접 연결되는 최소 필드:
+현재 코드와 직접 연결되는 최소 필드 (body 내부 fenced JSON):
 
 ### planner
 - `summary`
@@ -128,6 +126,14 @@ live probe로 확인 완료한 사실:
 - `result`
 - `score`
 - `findings[]`
+
+### orchestrator
+- `summary`
+- `decision` (`complete_cycle` / `needs_iteration` / `blocked`)
+- `next_state` (`completed` / `iterating` / `blocked`)
+- `reason`
+- `unresolved_items[]`
+- `recommended_next_action`
 
 ---
 
@@ -247,7 +253,6 @@ retry 규칙:
 재시도 시 추가 지시 (`_append_retry_prompt`):
 - 직전 시도의 에러 메시지를 그대로 재시도 프롬프트에 삽입 (최대 400자)
 - "Return one JSON object only."
-- "Do not use markdown."
 - "Do not add commentary outside the schema."
 - "Every required field must be present."
 - "Fix the specific problem above in this attempt."

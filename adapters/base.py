@@ -19,13 +19,15 @@ from tools.schema_utils import (
 
 
 ENGINE_ROOT = Path(__file__).resolve().parent.parent
-ROLE_SCHEMA_MAP = {
-    "planner": ENGINE_ROOT / "schemas" / "roles" / "planner.result.v1.json",
-    "builder": ENGINE_ROOT / "schemas" / "roles" / "builder.result.v1.json",
-    "verifier_functional": ENGINE_ROOT / "schemas" / "roles" / "verifier_functional.result.v1.json",
-    "verifier_human": ENGINE_ROOT / "schemas" / "roles" / "verifier_human.result.v1.json",
-    "orchestrator": ENGINE_ROOT / "schemas" / "roles" / "orchestrator.result.v1.json",
-}
+# Phase 2 P1-5-C: single schema for all roles. The legacy per-role
+# `schemas/roles/<role>.result.v1.json` files are retired; every adapter
+# reply is validated against utterance.v1 and then fed through
+# `_coerce_<role>_utterance_to_legacy` + `_normalize_role_payload` to
+# produce the structured state the rest of the engine still consumes.
+UTTERANCE_SCHEMA_PATH = ENGINE_ROOT / "schemas" / "utterance.v1.json"
+_SUPPORTED_ROLES = frozenset(
+    {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
+)
 ROLE_TIMEOUTS = {
     "planner": 180,
     "builder": 600,
@@ -126,7 +128,11 @@ class BaseCliAdapter(BaseAdapter):
     provider_label: str = ""
 
     def invoke(self, invocation: Invocation) -> InvocationResult:
-        schema_path = ROLE_SCHEMA_MAP[invocation.role]
+        if invocation.role not in _SUPPORTED_ROLES:
+            raise AdapterExecutionError(
+                f"Unsupported role for utterance.v1 invocation: {invocation.role!r}"
+            )
+        schema_path = UTTERANCE_SCHEMA_PATH
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         required_keys = list(schema.get("required", []))
         request_id = f"{self.provider_id}-{invocation.role}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
@@ -246,33 +252,28 @@ class BaseCliAdapter(BaseAdapter):
                 continue
 
             try:
-                payload = self.extract_payload(
+                raw_payload = self.extract_payload(
                     stdout_text=completed.stdout or "",
                     provider_result_path=provider_result_path,
                     schema=schema,
                 )
-                # Phase 2 free-utterance routing (D4/D5): if payload is an
-                # utterance.v1 shape, stash its routing metadata BEFORE coerce
-                # strips it down to legacy role fields. run_cycle will read this
-                # to dispatch the next speaker; absent -> legacy chain fallback.
-                utterance_meta: dict[str, object] | None = None
-                if isinstance(payload, dict) and _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-                    utterance_meta = {
-                        "speaker": payload.get("speaker"),
-                        "next_speaker": payload.get("next_speaker"),
-                        "declare_done": bool(payload.get("declare_done") or False),
-                        "arbitration": payload.get("arbitration"),
-                    }
-                # Phase 2 transition: coerce utterance.v1 → legacy BEFORE normalize.
-                # Ordering matters — _normalize_role_payload fills in required role
-                # fields, so the coerced output must pass through normalize so that
-                # fenced-json payloads lacking some fields still validate.
-                # See reviewer finding A-5.
-                coercer = _UTTERANCE_COERCERS.get(invocation.role)
-                if coercer is not None:
-                    payload = coercer(payload)
+                # Phase 2 P1-5-C: utterance.v1 is the only accepted shape.
+                # Validate first, then stash routing metadata, then extract
+                # the role-specific structured state the engine consumes.
+                _validate_schema(raw_payload, schema)
+                utterance_meta: dict[str, object] = {
+                    "speaker": raw_payload.get("speaker"),
+                    "next_speaker": raw_payload.get("next_speaker"),
+                    "declare_done": bool(raw_payload.get("declare_done") or False),
+                    "arbitration": raw_payload.get("arbitration"),
+                }
+                extractor = _UTTERANCE_COERCERS.get(invocation.role)
+                if extractor is None:
+                    raise AdapterExecutionError(
+                        f"No structured-state extractor for role {invocation.role!r}"
+                    )
+                payload = extractor(raw_payload)
                 payload = _normalize_role_payload(invocation.role, payload)
-                _validate_schema(payload, schema)
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
                 _write_json(
@@ -340,41 +341,34 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "verdict (pass/fail/needs_iteration/block/complete_cycle/info/warning/critical), "
             "and `suggestions` lists the concrete items still to address. Prioritize tasks "
             "that resolve non-info severities before opening new work.\n\n"
-            "--- Output format (Phase 2 transition — planner only, other roles still use legacy) ---\n"
-            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible; (A) remains valid for now.\n"
-            "(A) Legacy planner.result.v1 shape: keys summary, plan_summary, tasks, risks (schema above).\n"
-            "(B) PREFERRED utterance.v1 shape:\n"
+            "--- Output format (utterance.v1, required) ---\n"
+            "Return exactly this utterance.v1 shape:\n"
             "    {\n"
             "      \"speaker\": \"planner\",\n"
             "      \"body\": \"<markdown free-form: observations, rationale, the plan in plain prose>\",\n"
             "      \"next_speaker\": \"builder\"\n"
             "    }\n"
-            "    During the transition you MUST embed a fenced ```json``` block inside body containing "
-            "the minimum legacy payload so the engine can still dispatch work while other roles migrate:\n"
+            "Inside body you MUST embed exactly one fenced ```json``` block carrying the structured plan:\n"
             "    ```json\n"
             "    {\"plan_summary\": \"...\", \"tasks\": [{\"id\":\"task-1\",\"title\":\"...\","
             "\"acceptance\":\"...\",\"priority\":\"medium\",\"notes\":[]}], \"risks\": []}\n"
             "    ```\n"
-            "    The fenced-block requirement will be removed once builder / verifiers are also migrated."
+            "The engine parses the fenced block to populate the task backlog."
         ),
         "builder": (
             "Do the actual work in the working directory before you return JSON.\n\n"
-            "--- Output format (Phase 2 transition — builder) ---\n"
-            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible; (A) remains valid for now.\n"
-            "(A) Legacy builder.result.v1 shape: keys summary, change_summary, files_changed, artifact_paths, self_check.\n"
-            "(B) PREFERRED utterance.v1 shape:\n"
+            "--- Output format (utterance.v1, required) ---\n"
+            "Return exactly this utterance.v1 shape:\n"
             "    {\n"
             "      \"speaker\": \"builder\",\n"
             "      \"body\": \"<markdown free-form: what you did, why, surprises, caveats>\",\n"
             "      \"next_speaker\": \"verifier_functional\"\n"
             "    }\n"
-            "    During the transition you MUST embed a fenced ```json``` block inside body containing "
-            "the minimum legacy payload so the engine can still dispatch review while other roles migrate:\n"
+            "Inside body you MUST embed exactly one fenced ```json``` block with the build summary:\n"
             "    ```json\n"
             "    {\"change_summary\": \"...\", \"files_changed\": [\"...\"], \"artifact_paths\": [\"...\"], "
             "\"self_check\": {\"summary\":\"...\",\"unresolved\":[]}}\n"
-            "    ```\n"
-            "    The fenced-block requirement will be removed once verifier/orchestrator also migrate."
+            "    ```"
         ),
         "verifier_functional": (
             "Verify using concrete evidence such as commands, tests, logs, or produced files whenever possible. "
@@ -383,16 +377,14 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "'responsive + WCAG AA' but no styles.css or accessibility check has been produced), include that gap "
             "in suggested_actions even when the active task looks done. Never report suggested_actions=[] while "
             "an obvious objective-level item is still missing.\n\n"
-            "--- Output format (Phase 2 transition — verifier_functional) ---\n"
-            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
-            "(A) Legacy verifier_functional.result.v1 shape: summary, result, score, findings, evidence, blocking_issues, suggested_actions.\n"
-            "(B) PREFERRED utterance.v1 shape:\n"
+            "--- Output format (utterance.v1, required) ---\n"
+            "Return exactly this utterance.v1 shape:\n"
             "    {\n"
             "      \"speaker\": \"verifier_functional\",\n"
             "      \"body\": \"<markdown: what you tested, what evidence you gathered, what is broken or missing>\",\n"
             "      \"next_speaker\": \"verifier_human\"\n"
             "    }\n"
-            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "Inside body embed a fenced ```json``` block carrying the verdict:\n"
             "    ```json\n"
             "    {\"result\":\"pass|fail|needs_iteration|block\",\"score\":0.0,\"findings\":[],\"evidence\":[],"
             "\"blocking_issues\":[],\"suggested_actions\":[]}\n"
@@ -405,16 +397,14 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "current artifacts clearly do not deliver (placeholder content, missing responsive behavior, broken "
             "links, unverified accessibility), raise it in findings and suggested_actions even if the active "
             "task itself is technically done.\n\n"
-            "--- Output format (Phase 2 transition — verifier_human) ---\n"
-            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
-            "(A) Legacy verifier_human.result.v1 shape: summary, result, score, findings, strengths, comparison_notes, suggested_actions.\n"
-            "(B) PREFERRED utterance.v1 shape:\n"
+            "--- Output format (utterance.v1, required) ---\n"
+            "Return exactly this utterance.v1 shape:\n"
             "    {\n"
             "      \"speaker\": \"verifier_human\",\n"
             "      \"body\": \"<markdown: user-perspective read, strengths, weaknesses, suggestions>\",\n"
             "      \"next_speaker\": \"orchestrator\"\n"
             "    }\n"
-            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "Inside body embed a fenced ```json``` block carrying the verdict:\n"
             "    ```json\n"
             "    {\"result\":\"pass|fail|needs_iteration|block\",\"score\":0.0,\"findings\":[],\"strengths\":[],"
             "\"comparison_notes\":[],\"suggested_actions\":[]}\n"
@@ -432,16 +422,14 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "yourself in unresolved_items and choose needs_iteration. "
             "Use blocked only when the reviews explicitly declare a hard stop or the same failure has repeated "
             "without progress.\n\n"
-            "--- Output format (Phase 2 transition — orchestrator) ---\n"
-            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
-            "(A) Legacy orchestrator.result.v1 shape: summary, decision, next_state, reason, unresolved_items, recommended_next_action.\n"
-            "(B) PREFERRED utterance.v1 shape:\n"
+            "--- Output format (utterance.v1, required) ---\n"
+            "Return exactly this utterance.v1 shape:\n"
             "    {\n"
             "      \"speaker\": \"orchestrator\",\n"
             "      \"body\": \"<markdown: your judgment, reasoning against objective, what blocks or unblocks>\",\n"
             "      \"next_speaker\": \"planner\"\n"
             "    }\n"
-            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "Inside body embed a fenced ```json``` block carrying the decision:\n"
             "    ```json\n"
             "    {\"decision\":\"complete_cycle|needs_iteration|blocked\","
             "\"next_state\":\"completed|iterating|blocked\","
@@ -456,22 +444,14 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "verifier_human": "Do not modify files during review.",
         "orchestrator": "Do not modify files. You are a judgment-only role.",
     }[invocation.role]
-    if invocation.role in {
-        "planner", "builder", "verifier_functional", "verifier_human", "orchestrator"
-    }:
-        format_rule = (
-            "Return exactly one JSON object. The OUTER envelope must be plain JSON "
-            "(no markdown, no outer code fences). Phase 2 transition exception: if you "
-            "choose the utterance.v1 shape, you MAY use markdown inside the 'body' field "
-            "and embed exactly one fenced ```json``` block carrying the legacy payload. "
-            "The 'no markdown / no fences' rule still applies to everything outside body.\n"
-        )
-    else:
-        format_rule = (
-            "Return exactly one JSON object that matches the enforced schema.\n"
-            "Do not use markdown.\n"
-            "Do not wrap the JSON in code fences.\n"
-        )
+    format_rule = (
+        "Return exactly one JSON object conforming to utterance.v1 (the schema at "
+        "Schema path). The OUTER envelope must be plain JSON — no markdown, no outer "
+        "code fences. You MAY use markdown inside the 'body' string and MUST embed "
+        "exactly one fenced ```json``` block carrying the role-specific structured "
+        "payload shown under 'Output format'. The 'no markdown / no fences' rule "
+        "still applies to everything outside body.\n"
+    )
     return (
         f"You are running as orch-engine role '{invocation.role}'.\n"
         + format_rule
@@ -774,7 +754,6 @@ def _validate_schema(instance: Any, schema: dict[str, Any], path: str = "root") 
     _shared_validate_schema(instance, schema, path)
 
 
-_UTTERANCE_V1_KEYS = frozenset({"speaker", "body", "next_speaker"})
 _FENCED_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 _FENCED_JSON_TILDE_RE = re.compile(r"~~~json\s*\n(.*?)\n~~~", re.DOTALL)
 
@@ -794,14 +773,15 @@ def _extract_fenced_json(body: str) -> dict[str, Any] | None:
 
 
 def _coerce_planner_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
-    """Phase 2 transition: if planner returned a utterance.v1 shape, fold it into the
-    legacy planner.result.v1 shape the core pipeline still consumes. Non-utterance
-    payloads pass through untouched. D4 / D15~D18 ref: memory/autonomy-redesign-notes.md.
+    """Extract planner structured state from a utterance.v1 payload.
+
+    Since P1-5-C utterance.v1 is the only accepted wire shape, so the
+    adapter's invoke() validates utterance.v1 strictness upstream. This
+    function assumes the input is a validated utterance.v1 dict and
+    produces the structured fields (summary, plan_summary, tasks, risks)
+    the engine still consumes. Missing fields in the body's fenced JSON
+    are backfilled with sensible defaults.
     """
-    if not isinstance(payload, dict):
-        return payload
-    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-        return payload
     body = str(payload.get("body") or "")
     fenced = _extract_fenced_json(body) or {}
     first_line = next((line for line in body.splitlines() if line.strip()), "")
@@ -841,11 +821,7 @@ def _fenced_list(value: Any) -> list[str] | None:
 
 
 def _coerce_verifier_functional_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
-    """Phase 2 mirror for verifier_functional. See _coerce_planner_utterance_to_legacy."""
-    if not isinstance(payload, dict):
-        return payload
-    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-        return payload
+    """Extract verifier_functional structured state. See planner extractor."""
     body = str(payload.get("body") or "")
     fenced = _extract_fenced_json(body) or {}
     first_line = next((line for line in body.splitlines() if line.strip()), "")
@@ -864,11 +840,7 @@ def _coerce_verifier_functional_utterance_to_legacy(payload: dict[str, Any]) -> 
 
 
 def _coerce_verifier_human_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
-    """Phase 2 mirror for verifier_human."""
-    if not isinstance(payload, dict):
-        return payload
-    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-        return payload
+    """Extract verifier_human structured state. See planner extractor."""
     body = str(payload.get("body") or "")
     fenced = _extract_fenced_json(body) or {}
     first_line = next((line for line in body.splitlines() if line.strip()), "")
@@ -887,18 +859,14 @@ def _coerce_verifier_human_utterance_to_legacy(payload: dict[str, Any]) -> dict[
 
 
 def _coerce_orchestrator_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
-    """Phase 2 mirror for orchestrator.
+    """Extract orchestrator structured state.
 
     Unlike the verifiers, orchestrator.decision / next_state are enum-valued
     and the core pipeline hard-fails on unknown values. We therefore inject
-    safe defaults ('needs_iteration' / 'iterating') when the fenced block is
-    missing these keys, rather than letting _normalize_role_payload emit an
-    empty string that would fail validation.
+    safe defaults ('needs_iteration' / 'iterating') when the fenced JSON
+    block is missing these keys, rather than letting an empty string leak
+    through and trigger a later rejection.
     """
-    if not isinstance(payload, dict):
-        return payload
-    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-        return payload
     body = str(payload.get("body") or "")
     fenced = _extract_fenced_json(body) or {}
     first_line = next((line for line in body.splitlines() if line.strip()), "")
@@ -919,27 +887,13 @@ def _coerce_orchestrator_utterance_to_legacy(payload: dict[str, Any]) -> dict[st
     }
 
 
-_UTTERANCE_COERCERS = {
-    "planner": lambda p: _coerce_planner_utterance_to_legacy(p),
-    "builder": lambda p: _coerce_builder_utterance_to_legacy(p),
-    "verifier_functional": lambda p: _coerce_verifier_functional_utterance_to_legacy(p),
-    "verifier_human": lambda p: _coerce_verifier_human_utterance_to_legacy(p),
-    "orchestrator": lambda p: _coerce_orchestrator_utterance_to_legacy(p),
-}
-
-
 def _coerce_builder_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
-    """Phase 2 transition mirror of the planner coercion, for the builder role.
+    """Extract builder structured state from a utterance.v1 payload.
 
-    If the payload is in utterance.v1 shape, extract the legacy builder.result.v1
-    fields from a fenced ```json``` block inside body. Missing fields are left to
-    _normalize_role_payload downstream (it fills defaults). Pass-through for
-    non-utterance payloads.
+    Pulls summary, change_summary, files_changed, artifact_paths, and
+    self_check from the body's fenced ```json``` block. Missing fields
+    are backfilled by `_normalize_role_payload` downstream.
     """
-    if not isinstance(payload, dict):
-        return payload
-    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
-        return payload
     body = str(payload.get("body") or "")
     fenced = _extract_fenced_json(body) or {}
     first_line = next((line for line in body.splitlines() if line.strip()), "")
@@ -970,3 +924,15 @@ def _coerce_builder_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, An
         "artifact_paths": artifact_paths,
         "self_check": self_check,
     }
+
+
+# Role -> utterance.v1 structured-state extractor. Lookup is direct
+# function references (not lambdas) so IDE jump-to-definition and stack
+# traces point straight at the implementation.
+_UTTERANCE_COERCERS = {
+    "planner": _coerce_planner_utterance_to_legacy,
+    "builder": _coerce_builder_utterance_to_legacy,
+    "verifier_functional": _coerce_verifier_functional_utterance_to_legacy,
+    "verifier_human": _coerce_verifier_human_utterance_to_legacy,
+    "orchestrator": _coerce_orchestrator_utterance_to_legacy,
+}

@@ -102,8 +102,10 @@ def _build_prompt(domain: str, rubric_focus: str, artifact_files: dict[str, str]
     """Assemble a verifier prompt. Live adapter will receive this as input."""
     header = (
         f"You are the {domain} functional verifier. Evaluate the following "
-        f"artifact against the rubric axis '{rubric_focus}'. Respond per the "
-        f"verifier_functional.result.v1 schema."
+        f"artifact against the rubric axis '{rubric_focus}'. Respond with a "
+        f"utterance.v1 envelope (speaker=verifier_functional) and place the "
+        f"structured review (result/score/findings/...) in a fenced ```json``` "
+        f"block inside body."
     )
     body_parts = [header, "", "=== ARTIFACT FILES ==="]
     for rel, content in artifact_files.items():

@@ -8,13 +8,15 @@ from typing import Any
 
 
 ENGINE_ROOT = Path(__file__).resolve().parent.parent
-ROLE_SCHEMA_MAP = {
-    "planner": ENGINE_ROOT / "schemas" / "roles" / "planner.result.v1.json",
-    "builder": ENGINE_ROOT / "schemas" / "roles" / "builder.result.v1.json",
-    "verifier_functional": ENGINE_ROOT / "schemas" / "roles" / "verifier_functional.result.v1.json",
-    "verifier_human": ENGINE_ROOT / "schemas" / "roles" / "verifier_human.result.v1.json",
-    "orchestrator": ENGINE_ROOT / "schemas" / "roles" / "orchestrator.result.v1.json",
-}
+# Phase 2 P1-5-C: utterance.v1 is the single wire schema for all roles.
+UTTERANCE_SCHEMA_PATH = ENGINE_ROOT / "schemas" / "utterance.v1.json"
+SUPPORTED_ROLES = (
+    "planner",
+    "builder",
+    "verifier_functional",
+    "verifier_human",
+    "orchestrator",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,13 +50,13 @@ def main() -> int:
     args = parse_args()
     role_arg = args.role
     if role_arg == "all":
-        roles = ["planner", "builder", "verifier_functional", "verifier_human", "orchestrator"]
-    elif role_arg in ROLE_SCHEMA_MAP:
+        roles = list(SUPPORTED_ROLES)
+    elif role_arg in SUPPORTED_ROLES:
         roles = [role_arg]
     else:
         raise SystemExit(
             f"Unknown role: {role_arg}. Choose one of "
-            f"[{', '.join(ROLE_SCHEMA_MAP.keys())}, all]."
+            f"[{', '.join(SUPPORTED_ROLES)}, all]."
         )
 
     rc = 0
@@ -66,7 +68,7 @@ def main() -> int:
 
 
 def _probe_single_role(args: argparse.Namespace, role: str) -> int:
-    role_schema_path = ROLE_SCHEMA_MAP[role]
+    role_schema_path = UTTERANCE_SCHEMA_PATH
     role_schema = _read_json(role_schema_path)
 
     run_id = f"{args.provider}-{role}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -177,15 +179,19 @@ def _render_prompt(request: dict[str, Any], schema_path: Path) -> str:
     context_summary = request["context_summary"]
     return (
         f"You are running as orch-engine role '{role}'.\n"
-        "Return exactly one JSON object that matches the provided schema.\n"
-        "Do not use markdown.\n"
-        "Do not wrap the JSON in code fences.\n"
+        "Return exactly one JSON object conforming to utterance.v1 (schema at "
+        "Schema path). The OUTER envelope must be plain JSON — no markdown, "
+        "no outer code fences. You MAY use markdown inside the 'body' string "
+        "and MUST embed exactly one fenced ```json``` block carrying the "
+        "role-specific structured payload (tasks for planner, change_summary "
+        "/ files_changed for builder, result / score / findings for verifiers, "
+        "decision / next_state for orchestrator).\n"
         f"Objective: {objective}\n"
         f"Working directory: {working_directory}\n"
         f"Context summary: {context_summary}\n"
         f"Schema path: {schema_path}\n"
         "This is a probe run. Do not assume external files beyond the working directory.\n"
-        "If you are unsure, return the safest valid JSON for the role schema.\n"
+        "If you are unsure, return the safest valid utterance.v1 JSON.\n"
     )
 
 
