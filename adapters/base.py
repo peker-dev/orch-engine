@@ -245,12 +245,14 @@ class BaseCliAdapter(BaseAdapter):
                     schema=schema,
                 )
                 # Phase 2 transition: coerce utterance.v1 → legacy BEFORE normalize.
-                # Ordering matters — _normalize_role_payload fills in required task fields
-                # (id/title/acceptance/priority/notes), so the coerced output must pass
-                # through normalize so that fenced-json tasks lacking some fields still
-                # validate. See reviewer finding A-5.
+                # Ordering matters — _normalize_role_payload fills in required role
+                # fields, so the coerced output must pass through normalize so that
+                # fenced-json payloads lacking some fields still validate.
+                # See reviewer finding A-5.
                 if invocation.role == "planner":
                     payload = _coerce_planner_utterance_to_legacy(payload)
+                elif invocation.role == "builder":
+                    payload = _coerce_builder_utterance_to_legacy(payload)
                 payload = _normalize_role_payload(invocation.role, payload)
                 _validate_schema(payload, schema)
             except Exception as exc:  # noqa: BLE001
@@ -336,7 +338,25 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "    ```\n"
             "    The fenced-block requirement will be removed once builder / verifiers are also migrated."
         ),
-        "builder": "Do the actual work in the working directory before you return JSON.",
+        "builder": (
+            "Do the actual work in the working directory before you return JSON.\n\n"
+            "--- Output format (Phase 2 transition — builder) ---\n"
+            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible; (A) remains valid for now.\n"
+            "(A) Legacy builder.result.v1 shape: keys summary, change_summary, files_changed, artifact_paths, self_check.\n"
+            "(B) PREFERRED utterance.v1 shape:\n"
+            "    {\n"
+            "      \"speaker\": \"builder\",\n"
+            "      \"body\": \"<markdown free-form: what you did, why, surprises, caveats>\",\n"
+            "      \"next_speaker\": \"verifier_functional\"\n"
+            "    }\n"
+            "    During the transition you MUST embed a fenced ```json``` block inside body containing "
+            "the minimum legacy payload so the engine can still dispatch review while other roles migrate:\n"
+            "    ```json\n"
+            "    {\"change_summary\": \"...\", \"files_changed\": [\"...\"], \"artifact_paths\": [\"...\"], "
+            "\"self_check\": {\"summary\":\"...\",\"unresolved\":[]}}\n"
+            "    ```\n"
+            "    The fenced-block requirement will be removed once verifier/orchestrator also migrate."
+        ),
         "verifier_functional": (
             "Verify using concrete evidence such as commands, tests, logs, or produced files whenever possible. "
             "Then compare the final artifacts against the master objective itself, not just the active task's acceptance. "
@@ -374,14 +394,13 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "verifier_human": "Do not modify files during review.",
         "orchestrator": "Do not modify files. You are a judgment-only role.",
     }[invocation.role]
-    if invocation.role == "planner":
+    if invocation.role in {"planner", "builder"}:
         format_rule = (
             "Return exactly one JSON object. The OUTER envelope must be plain JSON "
             "(no markdown, no outer code fences). Phase 2 transition exception: if you "
             "choose the utterance.v1 shape, you MAY use markdown inside the 'body' field "
-            "and embed exactly one fenced ```json``` block carrying the legacy task "
-            "payload. The 'no markdown / no fences' rule still applies to everything "
-            "outside body.\n"
+            "and embed exactly one fenced ```json``` block carrying the legacy payload. "
+            "The 'no markdown / no fences' rule still applies to everything outside body.\n"
         )
     else:
         format_rule = (
@@ -747,4 +766,48 @@ def _coerce_planner_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, An
         "plan_summary": plan_summary,
         "tasks": tasks,
         "risks": risks,
+    }
+
+
+def _coerce_builder_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 transition mirror of the planner coercion, for the builder role.
+
+    If the payload is in utterance.v1 shape, extract the legacy builder.result.v1
+    fields from a fenced ```json``` block inside body. Missing fields are left to
+    _normalize_role_payload downstream (it fills defaults). Pass-through for
+    non-utterance payloads.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+        return payload
+    body = str(payload.get("body") or "")
+    fenced = _extract_fenced_json(body) or {}
+    first_line = next((line for line in body.splitlines() if line.strip()), "")
+    summary_src = fenced.get("summary") or payload.get("summary") or first_line or "builder utterance"
+    summary = str(summary_src).strip() or "builder utterance"
+    change_summary_src = fenced.get("change_summary") or summary
+    change_summary = str(change_summary_src).strip() or summary
+    files_raw = fenced.get("files_changed")
+    files_changed = [str(f) for f in files_raw] if isinstance(files_raw, list) else []
+    artifacts_raw = fenced.get("artifact_paths")
+    artifact_paths = [str(a) for a in artifacts_raw] if isinstance(artifacts_raw, list) else []
+    self_check_raw = fenced.get("self_check")
+    if isinstance(self_check_raw, dict):
+        sc_summary = str(self_check_raw.get("summary") or "ok").strip() or "ok"
+        sc_unresolved_raw = self_check_raw.get("unresolved")
+        sc_unresolved = (
+            [str(item) for item in sc_unresolved_raw]
+            if isinstance(sc_unresolved_raw, list)
+            else []
+        )
+        self_check = {"summary": sc_summary, "unresolved": sc_unresolved}
+    else:
+        self_check = {"summary": "ok", "unresolved": []}
+    return {
+        "summary": summary,
+        "change_summary": change_summary,
+        "files_changed": files_changed,
+        "artifact_paths": artifact_paths,
+        "self_check": self_check,
     }

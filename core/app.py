@@ -813,35 +813,25 @@ def _utc_timestamp() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _append_planner_timeline(
+def _append_role_timeline(
     runtime: RuntimeStore,
     *,
+    role: str,
     cycle_index: int,
-    summary: str,
-    plan_summary: str,
-    tasks: list[dict[str, object]] | list[object],
+    body: str,
+    next_speaker: str,
     provider_id: str,
 ) -> None:
-    """Phase 2 D2: append one planner utterance to runtime/timeline.jsonl (best-effort).
+    """Phase 2 D2: generic planner/builder/... timeline append (best-effort).
 
-    Failures are logged to events.jsonl instead of propagating — the main pipeline
-    should never be blocked by timeline write problems while the format is still
-    settling. Session id / utterance index are maintained inside runtime/session.json.
+    session_id / utterance_index are maintained in runtime/session.json. Failures
+    log a timeline_append_failed event; double-fault drops to stderr. Body is
+    caller-composed markdown — the engine writes it but does not parse it back.
     """
     try:
         session_state = runtime.read_json("runtime/session.json", {}) or {}
         session_id = session_state.get("session_id") or f"session-{uuid4().hex[:12]}"
         index = int(session_state.get("timeline_index", 0) or 0)
-        task_lines: list[str] = []
-        for task in (tasks or [])[:5]:
-            if isinstance(task, dict):
-                title = str(task.get("title") or task.get("id") or "").strip()
-                if title:
-                    task_lines.append(f"- {title}")
-        task_block = "\n".join(task_lines) if task_lines else "- (no tasks emitted)"
-        body = (
-            f"{summary}\n\n## Plan\n{plan_summary}\n\n## Tasks (cycle {cycle_index})\n{task_block}"
-        )
         entry = {
             "session_id": session_id,
             "utterance_index": index,
@@ -849,9 +839,9 @@ def _append_planner_timeline(
             "kind": "utterance",
             "speaker_provider": provider_id,
             "utterance": {
-                "speaker": "planner",
+                "speaker": role,
                 "body": body,
-                "next_speaker": "builder",
+                "next_speaker": next_speaker,
             },
         }
         runtime.append_jsonl("runtime/timeline.jsonl", entry)
@@ -863,20 +853,81 @@ def _append_planner_timeline(
                 "timeline_index": index + 1,
             },
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort append must not block pipeline
-        # Double-fault guard: if even events.jsonl write fails (disk full, perms),
-        # drop to stderr so the failure is at least visible without crashing run_cycle.
+    except Exception as exc:  # noqa: BLE001 - best-effort
         try:
             runtime.append_event(
                 "timeline_append_failed",
-                {"role": "planner", "cycle": cycle_index, "error": str(exc)},
+                {"role": role, "cycle": cycle_index, "error": str(exc)},
             )
         except Exception as inner_exc:  # noqa: BLE001
             print(
-                f"[timeline_append_failed_fallback] role=planner cycle={cycle_index} "
+                f"[timeline_append_failed_fallback] role={role} cycle={cycle_index} "
                 f"primary={exc} inner={inner_exc}",
                 file=sys.stderr,
             )
+
+
+def _append_planner_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    plan_summary: str,
+    tasks: list[dict[str, object]] | list[object],
+    provider_id: str,
+) -> None:
+    """Compose planner utterance body and delegate to _append_role_timeline."""
+    task_lines: list[str] = []
+    for task in (tasks or [])[:5]:
+        if isinstance(task, dict):
+            title = str(task.get("title") or task.get("id") or "").strip()
+            if title:
+                task_lines.append(f"- {title}")
+    task_block = "\n".join(task_lines) if task_lines else "- (no tasks emitted)"
+    body = (
+        f"{summary}\n\n## Plan\n{plan_summary}\n\n## Tasks (cycle {cycle_index})\n{task_block}"
+    )
+    _append_role_timeline(
+        runtime,
+        role="planner",
+        cycle_index=cycle_index,
+        body=body,
+        next_speaker="builder",
+        provider_id=provider_id,
+    )
+
+
+def _append_builder_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    change_summary: str,
+    files_changed: list[str],
+    artifact_paths: list[str],
+    unresolved: list[str],
+    provider_id: str,
+) -> None:
+    """Compose builder utterance body and delegate to _append_role_timeline."""
+    def _bullets(items: list[str]) -> str:
+        clean = [str(i).strip() for i in items if str(i).strip()]
+        return "\n".join(f"- {x}" for x in clean[:10]) if clean else "- (none)"
+
+    body = (
+        f"{summary}\n\n"
+        f"## Change summary\n{change_summary}\n\n"
+        f"## Files changed (cycle {cycle_index})\n{_bullets(files_changed)}\n\n"
+        f"## Artifacts\n{_bullets(artifact_paths)}\n\n"
+        f"## Unresolved\n{_bullets(unresolved)}"
+    )
+    _append_role_timeline(
+        runtime,
+        role="builder",
+        cycle_index=cycle_index,
+        body=body,
+        next_speaker="verifier_functional",
+        provider_id=provider_id,
+    )
 
 
 def _run_planner(
@@ -1180,6 +1231,16 @@ def _run_builder(
             "artifact_paths": artifact_paths,
             "unresolved": unresolved,
         },
+    )
+    _append_builder_timeline(
+        runtime,
+        cycle_index=cycle_index,
+        summary=str(result.summary or ""),
+        change_summary=str(payload.get("change_summary") or result.summary or ""),
+        files_changed=files_changed,
+        artifact_paths=artifact_paths,
+        unresolved=unresolved,
+        provider_id=roles_config.get("builder", "unknown"),
     )
 
 
