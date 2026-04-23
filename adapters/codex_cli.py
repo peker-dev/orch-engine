@@ -20,6 +20,10 @@ class CodexCliAdapter(BaseCliAdapter):
         provider_result_path: Path,
     ) -> tuple[list[str], bool]:
         sandbox_mode = "workspace-write" if invocation.role in {"builder", "verifier_functional"} else "read-only"
+        # Do NOT pass `--output-schema`. Codex CLI wires that flag into OpenAI's
+        # strict `response_format`, which rejects JSON Schema features we rely on
+        # for utterance.v1 (optional keys without being in `required`, allOf, etc.).
+        # Schema conformance is enforced by the prompt + engine-side _validate_schema.
         return (
             [
                 "codex",
@@ -30,8 +34,6 @@ class CodexCliAdapter(BaseCliAdapter):
                 "--skip-git-repo-check",
                 "--sandbox",
                 sandbox_mode,
-                "--output-schema",
-                str(schema_path),
                 "-o",
                 str(provider_result_path),
             ],
