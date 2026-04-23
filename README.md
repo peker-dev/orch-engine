@@ -106,8 +106,8 @@ verifier_human이 handoff 모드면:
 주요 정책:
 
 - `RESUMABLE_STATES = {idle, iterating, completed}`: 이 상태에서만 새 사이클 진입 허용
-- `max_cycles` / `stop_on_stagnation`: `needs_iteration`이 반복될 때 자동 중단
-- `handoff_pause_count`: 사람 개입으로 멈춘 사이클은 `max_cycles` 카운트에서 제외 (자동화 예산을 빨리 소진하지 않도록)
+- 사이클 종료 판정은 orchestrator LLM 단일 책임 (Phase 2 P1-5부터 규칙 기반 `max_cycles` / `stop_on_stagnation` escalation 제거)
+- `handoff_pause_count`: 세션이 handoff 로 일시정지한 횟수 (세션 텔레메트리용 누적 메트릭)
 - handoff 응답의 `findings` / `recommended_next_action`은 다음 iterating 사이클의 planner context에 자동 주입
 
 ---
@@ -126,6 +126,8 @@ verifier_human이 handoff 모드면:
 
 새 도메인 팩을 만들려면 `domains/schema/schema-a1.yaml`의 15 섹션 구조를 참조하세요.
 
+> **주의**: 도메인 yaml 의 `limits.cycle_limits.max_cycles` 및 `limits.auto_stop_rules.stop_on_stagnation` 은 Phase 2 P1-5-A 부터 **엔진이 읽지 않습니다**. 사이클 종료 판정 전권은 orchestrator LLM 에 있습니다. 두 필드는 도메인 팩 저자가 "합리적 예산"을 선언하는 용도로만 유지하며 (`rubric_coherence_smoke` E7 이 스키마 존재 여부만 검사), 값 변경은 현재 런타임 동작에 영향 없습니다.
+
 ---
 
 ## handoff 모드 (파일 기반 외부 도구 연동)
@@ -143,12 +145,17 @@ verifier_human이 handoff 모드면:
 
 ## 테스트
 
-3종 회귀 스모크 (총 28 시나리오). 실제 AI 호출 없이 엔진 내부 로직만 검증합니다. 실행 시간 ~5초.
+회귀 스모크 (엔진 내부 로직만 검증, 실제 AI 호출 없음). 실행 시간 ~5초.
 
 ```bash
-python -m tools.launcher_smoke          # 런처 메뉴 흐름 6종
-python -m tools.iteration_policy_smoke  # max_cycles / stagnation / handoff_pause_count 15종
-python -m tools.cycle_e2e_smoke         # ScriptedAdapter로 run-cycle 전체 흐름 7종
+python -m tools.launcher_smoke          # 런처 메뉴 흐름
+python -m tools.cycle_e2e_smoke         # ScriptedAdapter로 run-cycle 전체 흐름
+python -m tools.orchestrator_smoke      # orchestrator feedback loop
+python -m tools.quota_smoke             # quota-aware wait-and-resume
+python -m tools.timeline_smoke          # utterance.v1 timeline append
+python -m tools.arbitration_smoke       # orchestrator decision → next_speaker 라우팅
+python -m tools.domain_validity_smoke   # 도메인 팩 validator 골든 샘플
+python -m tools.rubric_coherence_smoke  # 도메인 rubric 구조 정합성
 ```
 
 실제 AI로 완전 E2E를 돌리려면 프로젝트 루트에서 `tools/adapter_probe.py --live`를 참조.

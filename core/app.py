@@ -30,7 +30,6 @@ from core.handoff_manager import (
     HandoffRequest,
     SUPPORTED_MODES,
 )
-from core.policy_loader import PolicyLoader
 from core.runtime_store import RuntimeStore
 from core.state_machine import EngineState, RESUMABLE_STATES
 
@@ -49,18 +48,6 @@ def parse_args() -> argparse.Namespace:
     init_parser.add_argument("--mode", default="greenfield", help="Run mode")
     init_parser.add_argument("--project-name", default="", help="Optional project name")
     init_parser.add_argument("--goal-summary", default="", help="Optional initial goal")
-    init_parser.add_argument(
-        "--max-cycles",
-        type=int,
-        default=None,
-        help="Safety cap for iteration cycles. 0 disables the cap. Overrides .orch/config/limits.yaml.",
-    )
-    init_parser.add_argument(
-        "--stop-on-stagnation",
-        choices=("true", "false"),
-        default=None,
-        help="Hard stop when two consecutive needs_iteration cycles fail to improve scores.",
-    )
     init_parser.add_argument(
         "--auto-wait",
         choices=("true", "false"),
@@ -174,14 +161,11 @@ def run_init(args: argparse.Namespace) -> int:
         {"domain": {"selected": args.domain, "calibrated": False}},
     )
 
-    # Override the template limits.yaml when the user supplied --max-cycles,
-    # --stop-on-stagnation, or the --auto-wait/--wait-* trio. Preserves other
-    # fields (token_preflight etc.).
+    # Override the template limits.yaml when the user supplied
+    # --auto-wait / --wait-* knobs. Preserves other fields (token_preflight etc.).
     overrides_provided = any(
         getattr(args, key, None) is not None
         for key in (
-            "max_cycles",
-            "stop_on_stagnation",
             "auto_wait",
             "wait_poll_interval_sec",
             "wait_max_hours",
@@ -193,10 +177,6 @@ def run_init(args: argparse.Namespace) -> int:
         limits_section = limits_doc.get("limits", {}) if isinstance(limits_doc, dict) else {}
         if not isinstance(limits_section, dict):
             limits_section = {}
-        if getattr(args, "max_cycles", None) is not None:
-            limits_section["max_cycles"] = max(0, int(args.max_cycles))
-        if getattr(args, "stop_on_stagnation", None) is not None:
-            limits_section["stop_on_stagnation"] = args.stop_on_stagnation == "true"
         wait_cfg = limits_section.get("usage_wait")
         if not isinstance(wait_cfg, dict):
             wait_cfg = {}
@@ -258,13 +238,11 @@ def run_cycle(args: argparse.Namespace) -> int:
     runtime = RuntimeStore(target_root)
     artifacts = ArtifactStore(target_root)
     dispatcher = Dispatcher()
-    policy_loader = PolicyLoader(ENGINE_ROOT)
 
     project_config = _read_yaml(orch_root / "config" / "project.yaml")
     roles_config = _read_yaml(orch_root / "config" / "roles.yaml").get("roles", {})
     limits_config = _read_yaml(orch_root / "config" / "limits.yaml").get("limits", {})
     workflow_config = _read_yaml(orch_root / "config" / "workflow.yaml").get("workflow", {})
-    common_policy = policy_loader.load_common().get("defaults", {})
     session = runtime.read_json("runtime/session.json", {})
 
     current_state = session.get("state", EngineState.IDLE.value)
@@ -457,12 +435,10 @@ def run_cycle(args: argparse.Namespace) -> int:
         print(f"사이클 {cycle_index} 중단 (adapter 실패): {exc}")
         return 2
 
-    resolved_limits = _resolve_iteration_limits(limits_config, common_policy)
     refreshed_session = runtime.read_json("runtime/session.json", {})
     score_history = _score_history(refreshed_session)
-    handoff_pause_count = int(refreshed_session.get("handoff_pause_count", 0) or 0)
     try:
-        base_decision = _run_orchestrator(
+        decision = _run_orchestrator(
             target_root=target_root,
             runtime=runtime,
             roles_config=roles_config,
@@ -482,15 +458,6 @@ def run_cycle(args: argparse.Namespace) -> int:
             return 3
         print(f"사이클 {cycle_index} 중단 (orchestrator LLM 실패): {exc}")
         return 2
-    decision = _apply_iteration_policy(
-        base_decision,
-        cycle_index=cycle_index,
-        score_history=score_history,
-        limits=resolved_limits,
-        functional_review=functional_review,
-        human_review=human_review,
-        handoff_pause_count=handoff_pause_count,
-    )
     _finalize_cycle(
         target_root=target_root,
         runtime=runtime,
@@ -1434,154 +1401,11 @@ def _run_verifier(
     return review_payload
 
 
-def _resolve_iteration_limits(
-    limits_config: dict[str, object],
-    common_defaults: dict[str, object],
-) -> dict[str, object]:
-    """Merge target-level limits.yaml with the common policy defaults.
-
-    Parameters mirror what `run_cycle` already has in scope:
-      - `limits_config` is the `limits` dict inside the target's `.orch/config/limits.yaml`.
-      - `common_defaults` is the `defaults` dict under `domains/common/common.yaml`
-        (i.e. `PolicyLoader.load_common()["defaults"]`). It contains `limits`,
-        `scoring`, and `guardrails` sections — we only read `limits` here.
-
-    Project-level values win. Falls back to the common defaults, then to
-    hard-coded safe values (max_cycles=6, stop_on_stagnation=True).
-
-    `max_cycles <= 0` (after merging) is interpreted as "no cycle cap" by
-    `_apply_iteration_policy`; we therefore normalize any such value to 0.
-    """
-    common_limits = common_defaults.get("limits", {}) if isinstance(common_defaults, dict) else {}
-    common_cycle = common_limits.get("cycle_limits", {}) if isinstance(common_limits, dict) else {}
-    common_stop = common_limits.get("auto_stop_rules", {}) if isinstance(common_limits, dict) else {}
-
-    project_max = limits_config.get("max_cycles") if isinstance(limits_config, dict) else None
-    project_stop = limits_config.get("stop_on_stagnation") if isinstance(limits_config, dict) else None
-
-    default_max = common_cycle.get("max_cycles", 6) if isinstance(common_cycle, dict) else 6
-    default_stop = common_stop.get("stop_on_stagnation", True) if isinstance(common_stop, dict) else True
-
-    try:
-        max_cycles = int(project_max if project_max is not None else default_max)
-    except (TypeError, ValueError):
-        max_cycles = 6
-    if max_cycles < 0:
-        max_cycles = 0  # treated as "no cap" by _apply_iteration_policy
-    stop_on_stagnation = bool(
-        project_stop if project_stop is not None else default_stop
-    )
-    return {"max_cycles": max_cycles, "stop_on_stagnation": stop_on_stagnation}
-
-
 def _score_history(session: dict[str, object]) -> list[dict[str, object]]:
     raw = session.get("score_history") if isinstance(session, dict) else None
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
-
-
-def _apply_iteration_policy(
-    base_decision: dict[str, object],
-    *,
-    cycle_index: int,
-    score_history: list[dict[str, object]],
-    limits: dict[str, object],
-    functional_review: dict[str, object],
-    human_review: dict[str, object],
-    handoff_pause_count: int = 0,
-) -> dict[str, object]:
-    """Escalate `needs_iteration` to a hard stop when policy limits are hit.
-
-    `handoff_pause_count` is the number of cycles in this session that paused
-    mid-flow for a Codex App handoff and therefore never ran a full
-    planner->builder->verifier loop. Those cycles consume a `cycle_index`
-    slot but should not count toward `max_cycles`, because the reviewer pause
-    itself is not a failed iteration attempt. We subtract the pause count to
-    get the effective iteration count that policy limits are measured against.
-    """
-    if base_decision.get("decision") != "needs_iteration":
-        return base_decision
-
-    # `max_cycles <= 0` is interpreted as "no cycle cap" — see
-    # `_resolve_iteration_limits` for how that value is produced.
-    max_cycles = int(limits.get("max_cycles", 0) or 0)
-    pause_count = max(0, int(handoff_pause_count or 0))
-    effective_cycle = max(0, cycle_index - pause_count)
-    if max_cycles > 0 and effective_cycle >= max_cycles:
-        pause_note = (
-            f" (handoff 일시정지 {pause_count}회 제외)" if pause_count else ""
-        )
-        return {
-            "decision": "max_cycles_reached",
-            "next_state": EngineState.BLOCKED.value,
-            "reason": (
-                f"중단: 유효 사이클 {effective_cycle}{pause_note}이 "
-                f"max_cycles={max_cycles}에 도달, 리뷰 결과는 needs_iteration."
-            ),
-        }
-
-    if limits.get("stop_on_stagnation") and _is_stagnating(
-        score_history=score_history,
-        current_functional=float(functional_review.get("score", 0.0)),
-        current_human=float(human_review.get("score", 0.0)),
-    ):
-        return {
-            "decision": "stagnation_detected",
-            "next_state": EngineState.BLOCKED.value,
-            "reason": (
-                "중단: needs_iteration 사이클 2회 연속 점수 개선 없음 "
-                "(stop_on_stagnation=true)."
-            ),
-        }
-    return base_decision
-
-
-def _is_stagnating(
-    *,
-    score_history: list[dict[str, object]],
-    current_functional: float,
-    current_human: float,
-    min_consecutive_regressions: int = 3,
-) -> bool:
-    """Return True when the most recent `min_consecutive_regressions` iteration
-    transitions in a row each regressed on both functional and human scores.
-
-    2026-04-21 update: earlier behaviour was "single no-improvement cycle
-    trips". The 15차 live run (`memory/live-run-2026-04-21.md` cycles 3 → 4)
-    showed that LLM planners can recover in the very next cycle after a
-    one-off regression, so a single dip should not end the loop. The new rule
-    waits for a sustained downward streak.
-
-    Streak semantics: build the chain
-        prior_needs_iteration_entries + [current]
-    and check whether the last `min_consecutive_regressions + 1` points form
-    `min_consecutive_regressions` consecutive "neither score improved"
-    transitions. One upward move anywhere in the tail breaks the streak.
-    """
-    prior_iterations = [
-        entry for entry in score_history if entry.get("decision") == "needs_iteration"
-    ]
-    points: list[tuple[float, float]] = []
-    for entry in prior_iterations:
-        try:
-            f = float(entry.get("functional_score", 0.0) or 0.0)
-            h = float(entry.get("human_score", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return False
-        points.append((f, h))
-    points.append((current_functional, current_human))
-
-    required = max(1, int(min_consecutive_regressions))
-    if len(points) < required + 1:
-        return False
-    tail = points[-(required + 1):]
-    for i in range(1, len(tail)):
-        prev_f, prev_h = tail[i - 1]
-        cur_f, cur_h = tail[i]
-        if cur_f > prev_f or cur_h > prev_h:
-            return False
-    return True
 
 
 _DECISION_TO_STATE = {
@@ -1893,8 +1717,8 @@ def _pause_for_human_handoff(
         raise AdapterExecutionError(f"handoff mode failed to open: {exc}") from exc
 
     session = runtime.read_json("runtime/session.json", {})
-    # Track handoff-pause cycles separately from cycle_index so the iteration
-    # policy can exclude them from max_cycles. See `_apply_iteration_policy`.
+    # Session-level telemetry: how many times this session paused mid-cycle
+    # for a Codex App handoff. Retained for handoff lifecycle observability.
     pause_count = int(session.get("handoff_pause_count", 0) or 0) + 1
     runtime.write_json(
         "runtime/session.json",

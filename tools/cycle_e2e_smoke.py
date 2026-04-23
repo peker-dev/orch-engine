@@ -1,28 +1,19 @@
-"""End-to-end smoke tests for run_cycle iteration policy + handoff mode.
+"""End-to-end smoke tests for run_cycle + handoff mode.
 
-Previous coverage:
-- `tools/iteration_policy_smoke.py` exercises the pure functions
-  (`_apply_iteration_policy`, `_is_stagnating`, `_resolve_iteration_limits`).
-- `tools/launcher_smoke.py` exercises the launcher wizard and CLI
-  passthrough.
+This module runs the actual `run_cycle` flow (planner -> builder ->
+verifier_functional -> verifier_human -> orchestrator decision) with a
+deterministic ScriptedAdapter and asserts that session state,
+score_history, and decision transitions match what the orchestrator LLM
+decides. Since Phase 2 removed the cycle-based escalation policy
+(`max_cycles`, `stop_on_stagnation`), the engine now trusts the
+orchestrator LLM's decision verbatim — there is no rule-based override.
 
-This module fills the gap between them: it runs the actual `run_cycle`
-flow (planner -> builder -> verifier_functional -> verifier_human ->
-orchestrator decision) multiple times with a deterministic FakeAdapter,
-and asserts that session state, score_history, and decision transitions
-match the configured policy.
-
-Scenarios:
-    - complete_on_first_cycle      : high scores -> completed
-    - max_cycles_reached           : low scores + max_cycles=2 -> blocked
-    - stagnation_detected          : four needs_iteration cycles with three
-                                     consecutive regressions -> blocked by
-                                     stagnation policy (2026-04-21 relaxed
-                                     threshold)
-    - handoff_mode_pauses_cycle    : workflow.human_review_mode=handoff ->
-                                     cycle pauses at verifier_functional ->
-                                     handoff_active, then handoff-ingest
-                                     resumes to completed
+Scenarios (post Phase 2 P1-5):
+    - complete_on_first_cycle               : high scores -> completed
+    - needs_iteration_then_success          : recovery path
+    - handoff_mode_pauses_cycle             : workflow.human_review_mode=handoff
+    - handoff_feedback_reaches_planner      : prior handoff findings reach planner
+    - terminal_handoff_clears_feedback      : approved handoff clears stale feedback
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -310,87 +301,6 @@ def _scenario_complete_on_first_cycle(sandbox: Path) -> ScenarioResult:
     )
 
 
-def _scenario_max_cycles_reached(sandbox: Path) -> ScenarioResult:
-    target = sandbox / "max-cycles"
-    _init_project(target, limits_override={"max_cycles": 2, "stop_on_stagnation": False})
-    # All cycles return low score + needs_iteration, but different enough to
-    # avoid triggering the stagnation stop (which is disabled anyway).
-    _install_scripted_adapters(
-        [
-            {"functional": 0.3, "human": 0.3, "result": "needs_iteration"},
-            {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
-        ]
-    )
-    _run_cycle(target)  # cycle 1 -> needs_iteration -> iterating
-    session1 = _read_session(target)
-    if session1.get("state") != "iterating":
-        return ScenarioResult(
-            "max_cycles_reached",
-            False,
-            f"cycle 1 state={session1.get('state')} != iterating",
-        )
-    _run_cycle(target)  # cycle 2 -> reaches max_cycles -> blocked
-    session2 = _read_session(target)
-    if session2.get("state") != "blocked":
-        return ScenarioResult(
-            "max_cycles_reached",
-            False,
-            f"cycle 2 state={session2.get('state')} != blocked (expected max_cycles_reached)",
-        )
-    if session2.get("last_decision") != "max_cycles_reached":
-        return ScenarioResult(
-            "max_cycles_reached",
-            False,
-            f"last_decision={session2.get('last_decision')} != max_cycles_reached",
-        )
-    history = session2.get("score_history", [])
-    if len(history) != 2:
-        return ScenarioResult(
-            "max_cycles_reached",
-            False,
-            f"expected 2 history entries, got {len(history)}",
-        )
-    return ScenarioResult(
-        "max_cycles_reached", True, "blocked at cycle 2 with max_cycles_reached"
-    )
-
-
-def _scenario_stagnation_detected(sandbox: Path) -> ScenarioResult:
-    target = sandbox / "stagnation"
-    _init_project(target, limits_override={"max_cycles": 10, "stop_on_stagnation": True})
-    # 2026-04-21 relaxed threshold: stagnation requires three consecutive
-    # regressions. Here cycles 2→3→4 each regress on both scores, so cycle 4
-    # should trip `stagnation_detected` / state=blocked.
-    _install_scripted_adapters(
-        [
-            {"functional": 0.9, "human": 0.9, "result": "needs_iteration"},
-            {"functional": 0.7, "human": 0.7, "result": "needs_iteration"},
-            {"functional": 0.5, "human": 0.5, "result": "needs_iteration"},
-            {"functional": 0.3, "human": 0.3, "result": "needs_iteration"},
-        ]
-    )
-    for _ in range(4):
-        _run_cycle(target)
-    session = _read_session(target)
-    if session.get("state") != "blocked":
-        return ScenarioResult(
-            "stagnation_detected",
-            False,
-            f"state={session.get('state')} != blocked",
-        )
-    if session.get("last_decision") != "stagnation_detected":
-        return ScenarioResult(
-            "stagnation_detected",
-            False,
-            f"last_decision={session.get('last_decision')} != stagnation_detected",
-        )
-    return ScenarioResult(
-        "stagnation_detected",
-        True,
-        "three-regression streak stopped the loop (cycles 2→3→4 each regressed)",
-    )
-
-
 def _scenario_handoff_mode_pauses_cycle(sandbox: Path) -> ScenarioResult:
     target = sandbox / "handoff-mode"
     _init_project(target, workflow_override={"human_review_mode": "handoff"})
@@ -569,134 +479,6 @@ def _scenario_handoff_feedback_reaches_planner(sandbox: Path) -> ScenarioResult:
     )
 
 
-def _scenario_handoff_pause_not_counted_toward_max_cycles(sandbox: Path) -> ScenarioResult:
-    """Verify `handoff_pause_count` actually offsets `cycle_index` inside
-    `_apply_iteration_policy`. The previous version of this scenario ran
-    only handoff-paused cycles, which never call the policy at all — so the
-    offset math was never exercised. This version adds a real cli-mode cycle
-    at the end whose `needs_iteration` decision DOES flow through
-    `_apply_iteration_policy`, and asserts that the stored pause_count
-    correctly prevents max_cycles from tripping.
-
-    Plan:
-      cycle 1 — handoff mode, pause, ingest(changes_made) -> iterating, pause=1
-      cycle 2 — handoff mode, pause, ingest(changes_made) -> iterating, pause=2
-      switch workflow to cli
-      cycle 3 — cli mode, adapters return needs_iteration.
-                cycle_index=3, pause_count=2, effective=1 < max_cycles=2
-                -> state stays `iterating`, last_decision=needs_iteration.
-                Without the offset it would have been max_cycles_reached.
-    """
-    target = sandbox / "handoff-max-exempt"
-    _init_project(
-        target,
-        limits_override={"max_cycles": 2, "stop_on_stagnation": False},
-        workflow_override={"human_review_mode": "handoff"},
-    )
-    _install_scripted_adapters(
-        [{"functional": 0.4, "human": 0.4, "result": "needs_iteration"}]
-    )
-
-    def _ingest_changes_made(tag: str) -> ScenarioResult | None:
-        request_doc = yaml.safe_load(
-            (target / ".orch" / "handoff" / "request.yaml").read_text(encoding="utf-8")
-        )
-        response_payload = {
-            "handoff_id": request_doc["handoff_id"],
-            "completed_at": "2026-04-17T00:00:00Z",
-            "result": "changes_made",
-            "summary": f"keep iterating ({tag})",
-            "decision": "continue",
-            "findings": [],
-            "files_changed": [],
-            "artifacts_added": [],
-            "recommended_next_action": "next round",
-            "resume_condition": "resume via handoff-ingest",
-            "remaining_risks": [],
-        }
-        (target / ".orch" / "handoff" / "response.yaml").write_text(
-            yaml.safe_dump(response_payload), encoding="utf-8"
-        )
-        if app.run_handoff_ingest(argparse.Namespace(target=str(target))) != 0:
-            return ScenarioResult(
-                "handoff_pause_not_counted_toward_max_cycles",
-                False,
-                f"ingest {tag} rc!=0",
-            )
-        return None
-
-    # Cycle 1 — handoff pause
-    if _run_cycle(target) != 0:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles", False, "cycle1 rc!=0"
-        )
-    session1 = _read_session(target)
-    if session1.get("state") != "handoff_active" or session1.get("handoff_pause_count") != 1:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles",
-            False,
-            f"cycle1 unexpected session: state={session1.get('state')} pause={session1.get('handoff_pause_count')}",
-        )
-    err = _ingest_changes_made("cycle1")
-    if err:
-        return err
-
-    # Cycle 2 — still handoff mode, another pause
-    if _run_cycle(target) != 0:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles", False, "cycle2 rc!=0"
-        )
-    session2 = _read_session(target)
-    if session2.get("state") != "handoff_active" or session2.get("handoff_pause_count") != 2:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles",
-            False,
-            f"cycle2 unexpected session: state={session2.get('state')} pause={session2.get('handoff_pause_count')}",
-        )
-    err = _ingest_changes_made("cycle2")
-    if err:
-        return err
-
-    # Switch to cli mode so the next cycle actually runs verifier_human and
-    # reaches `_apply_iteration_policy`.
-    workflow_path = target / ".orch" / "config" / "workflow.yaml"
-    workflow_doc = yaml.safe_load(workflow_path.read_text(encoding="utf-8")) or {}
-    workflow_doc.setdefault("workflow", {})["human_review_mode"] = "cli"
-    workflow_path.write_text(yaml.safe_dump(workflow_doc), encoding="utf-8")
-
-    # Cycle 3 — real policy check. cycle_index=3, pause=2, effective=1 < 2.
-    if _run_cycle(target) != 0:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles", False, "cycle3 rc!=0"
-        )
-    session3 = _read_session(target)
-    if session3.get("state") != "iterating":
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles",
-            False,
-            f"cycle3 state={session3.get('state')} != iterating "
-            f"(max_cycles=2 should have been offset by pause_count=2 to effective=1)",
-        )
-    if session3.get("last_decision") != "needs_iteration":
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles",
-            False,
-            f"cycle3 last_decision={session3.get('last_decision')} != needs_iteration "
-            f"(expected offset to prevent max_cycles_reached)",
-        )
-    if session3.get("handoff_pause_count") != 2:
-        return ScenarioResult(
-            "handoff_pause_not_counted_toward_max_cycles",
-            False,
-            f"cycle3 pause_count={session3.get('handoff_pause_count')} != 2 (should not change in cli cycle)",
-        )
-    return ScenarioResult(
-        "handoff_pause_not_counted_toward_max_cycles",
-        True,
-        "real cli cycle after 2 handoff pauses stayed iterating instead of max_cycles_reached",
-    )
-
-
 def _scenario_terminal_handoff_clears_feedback(sandbox: Path) -> ScenarioResult:
     """A terminal handoff outcome (approved/blocked/rejected) must not leave
     a stale `reviews/handoff_latest.json` behind. Otherwise a later iterating
@@ -718,8 +500,8 @@ def _scenario_terminal_handoff_clears_feedback(sandbox: Path) -> ScenarioResult:
         [
             # Cycle 1 adapters never reach verifiers past functional thanks to handoff pause.
             {"functional": 0.9, "human": 0.9, "result": "pass"},
-            # After switching to cli mode, cycles 2 and 3 use needs_iteration
-            # so _apply_iteration_policy is exercised but max_cycles stays large.
+            # After switching to cli mode, cycles 2 and 3 return needs_iteration
+            # so the orchestrator decides continuation (no rule-based override).
             {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
             {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
         ]
@@ -759,8 +541,8 @@ def _scenario_terminal_handoff_clears_feedback(sandbox: Path) -> ScenarioResult:
                 f"handoff_latest.json should be empty after approved, got keys={list(body.keys())}",
             )
 
-    # Switch to cli mode so the next cycles actually run verifier_human and
-    # reach `_apply_iteration_policy`.
+    # Switch to cli mode so the next cycles actually run verifier_human
+    # (and thus the orchestrator) instead of pausing for handoff.
     workflow_path = target / ".orch" / "config" / "workflow.yaml"
     workflow_doc = yaml.safe_load(workflow_path.read_text(encoding="utf-8")) or {}
     workflow_doc.setdefault("workflow", {})["human_review_mode"] = "cli"
@@ -813,7 +595,7 @@ def _scenario_needs_iteration_then_success(sandbox: Path) -> ScenarioResult:
     a follow-up cycle with improved scores closes it out cleanly.
     """
     target = sandbox / "needs-iter-then-success"
-    _init_project(target, limits_override={"max_cycles": 5, "stop_on_stagnation": False})
+    _init_project(target)
     _install_scripted_adapters(
         [
             {"functional": 0.4, "human": 0.4, "result": "needs_iteration"},
@@ -867,11 +649,8 @@ def _scenario_needs_iteration_then_success(sandbox: Path) -> ScenarioResult:
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
-    "max_cycles_reached": _scenario_max_cycles_reached,
-    "stagnation_detected": _scenario_stagnation_detected,
     "handoff_mode_pauses_cycle": _scenario_handoff_mode_pauses_cycle,
     "handoff_feedback_reaches_planner": _scenario_handoff_feedback_reaches_planner,
-    "handoff_pause_not_counted_toward_max_cycles": _scenario_handoff_pause_not_counted_toward_max_cycles,
     "terminal_handoff_clears_feedback": _scenario_terminal_handoff_clears_feedback,
 }
 

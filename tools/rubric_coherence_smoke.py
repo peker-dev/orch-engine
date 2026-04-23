@@ -13,6 +13,8 @@ Errors (any -> rc=1):
         verify_human.approval_rules)
     E6  verify_functional.pass_fail_rules contains >=1 "hard fail" clause
     E7  limits.cycle_limits.max_cycles is a positive int
+        (schema presence only — engine no longer enforces this value since
+         P1-5-A; kept so domain packs declare a sane budget for humans.)
     E8  no duplicate entries (whitespace-normalized, case-insensitive) inside
         the structured list arrays listed in _DUP_CHECK_PATHS
 
@@ -170,6 +172,11 @@ def _check_hard_fail_clause(data: dict, report: DomainReport) -> None:
 
 
 def _check_cycle_limits(data: dict, report: DomainReport) -> None:
+    # Schema presence check only. Since P1-5-A (Phase 2) the engine no longer
+    # reads this value — cycle continuation is decided by the orchestrator
+    # LLM. We keep the field in domain packs so human authors declare a
+    # roughly sane budget, and this smoke keeps it from silently drifting
+    # to a non-positive value.
     max_cycles = _get(data, ("limits", "cycle_limits", "max_cycles"))
     if not isinstance(max_cycles, int) or max_cycles <= 0:
         report.errors.append(

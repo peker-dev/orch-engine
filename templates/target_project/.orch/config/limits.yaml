@@ -1,8 +1,6 @@
 {
   "limits": {
-    "max_cycles": 6,
     "max_parallel_workers": 1,
-    "stop_on_stagnation": true,
     "token_preflight": {
       "enabled": true,
       "round_budget_tokens": 60000,
