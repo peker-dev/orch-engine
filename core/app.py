@@ -5,9 +5,11 @@ import shutil
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from math import ceil
 from pathlib import Path
 from typing import Callable
+from uuid import uuid4
 
 import yaml
 
@@ -805,6 +807,69 @@ def _latest_adapter_artifact_path(target_root: Path, role: str) -> str:
     return str(latest.relative_to(target_root))
 
 
+def _utc_timestamp() -> str:
+    """ISO-8601 UTC with millisecond precision, trailing Z (matches timeline_entry.v1)."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _append_planner_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    plan_summary: str,
+    tasks: list[dict[str, object]] | list[object],
+    provider_id: str,
+) -> None:
+    """Phase 2 D2: append one planner utterance to runtime/timeline.jsonl (best-effort).
+
+    Failures are logged to events.jsonl instead of propagating — the main pipeline
+    should never be blocked by timeline write problems while the format is still
+    settling. Session id / utterance index are maintained inside runtime/session.json.
+    """
+    try:
+        session_state = runtime.read_json("runtime/session.json", {}) or {}
+        session_id = session_state.get("session_id") or f"session-{uuid4().hex[:12]}"
+        index = int(session_state.get("timeline_index", 0) or 0)
+        task_lines: list[str] = []
+        for task in (tasks or [])[:5]:
+            if isinstance(task, dict):
+                title = str(task.get("title") or task.get("id") or "").strip()
+                if title:
+                    task_lines.append(f"- {title}")
+        task_block = "\n".join(task_lines) if task_lines else "- (no tasks emitted)"
+        body = (
+            f"{summary}\n\n## Plan\n{plan_summary}\n\n## Tasks (cycle {cycle_index})\n{task_block}"
+        )
+        entry = {
+            "session_id": session_id,
+            "utterance_index": index,
+            "timestamp": _utc_timestamp(),
+            "kind": "utterance",
+            "speaker_provider": provider_id,
+            "utterance": {
+                "speaker": "planner",
+                "body": body,
+                "next_speaker": "builder",
+            },
+        }
+        runtime.append_jsonl("runtime/timeline.jsonl", entry)
+        runtime.write_json(
+            "runtime/session.json",
+            {
+                **session_state,
+                "session_id": session_id,
+                "timeline_index": index + 1,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort append must not block pipeline
+        runtime.append_event(
+            "timeline_append_failed",
+            {"role": "planner", "cycle": cycle_index, "error": str(exc)},
+        )
+
+
 def _run_planner(
     *,
     target_root: Path,
@@ -899,6 +964,14 @@ def _run_planner(
             "backlog_size": len(backlog),
             "new_task_ids": [_task_key(t) for t in tasks if _task_key(t)],
         },
+    )
+    _append_planner_timeline(
+        runtime,
+        cycle_index=cycle_index,
+        summary=str(result.summary or ""),
+        plan_summary=str(plan_summary or ""),
+        tasks=tasks if isinstance(tasks, list) else [],
+        provider_id=roles_config.get("planner", "unknown"),
     )
     if not active_task:
         runtime.append_event(

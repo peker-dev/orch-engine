@@ -32,3 +32,9 @@ class RuntimeStore:
         line = {"event": event_type, **payload}
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(line, ensure_ascii=True) + "\n")
+
+    def append_jsonl(self, relative_path: str, entry: dict[str, Any]) -> None:
+        path = self.orch_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=True) + "\n")

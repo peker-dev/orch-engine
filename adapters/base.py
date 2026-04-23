@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import datetime
 from abc import ABC, abstractmethod
@@ -244,6 +245,8 @@ class BaseCliAdapter(BaseAdapter):
                     schema=schema,
                 )
                 payload = _normalize_role_payload(invocation.role, payload)
+                if invocation.role == "planner":
+                    payload = _coerce_planner_utterance_to_legacy(payload)
                 _validate_schema(payload, schema)
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
@@ -310,7 +313,23 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "(functional/human/handoff/orchestrator), `severity` is the headline "
             "verdict (pass/fail/needs_iteration/block/complete_cycle/info/warning/critical), "
             "and `suggestions` lists the concrete items still to address. Prioritize tasks "
-            "that resolve non-info severities before opening new work."
+            "that resolve non-info severities before opening new work.\n\n"
+            "--- Output format (Phase 2 transition — planner only, other roles still use legacy) ---\n"
+            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible; (A) remains valid for now.\n"
+            "(A) Legacy planner.result.v1 shape: keys summary, plan_summary, tasks, risks (schema above).\n"
+            "(B) PREFERRED utterance.v1 shape:\n"
+            "    {\n"
+            "      \"speaker\": \"planner\",\n"
+            "      \"body\": \"<markdown free-form: observations, rationale, the plan in plain prose>\",\n"
+            "      \"next_speaker\": \"builder\"\n"
+            "    }\n"
+            "    During the transition you MUST embed a fenced ```json``` block inside body containing "
+            "the minimum legacy payload so the engine can still dispatch work while other roles migrate:\n"
+            "    ```json\n"
+            "    {\"plan_summary\": \"...\", \"tasks\": [{\"id\":\"task-1\",\"title\":\"...\","
+            "\"acceptance\":\"...\",\"priority\":\"medium\",\"notes\":[]}], \"risks\": []}\n"
+            "    ```\n"
+            "    The fenced-block requirement will be removed once builder / verifiers are also migrated."
         ),
         "builder": "Do the actual work in the working directory before you return JSON.",
         "verifier_functional": (
@@ -652,3 +671,62 @@ def _normalize_result(value: Any) -> str:
 def _validate_schema(instance: Any, schema: dict[str, Any], path: str = "root") -> None:
     """Thin internal alias so callers inside adapters keep using `_validate_schema`."""
     _shared_validate_schema(instance, schema, path)
+
+
+_UTTERANCE_V1_KEYS = frozenset({"speaker", "body", "next_speaker"})
+_FENCED_JSON_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
+_FENCED_JSON_TILDE_RE = re.compile(r"~~~json\s*\n(.*?)\n~~~", re.DOTALL)
+
+
+def _extract_fenced_json(body: str) -> dict[str, Any] | None:
+    for pattern in (_FENCED_JSON_RE, _FENCED_JSON_TILDE_RE):
+        match = pattern.search(body)
+        if not match:
+            continue
+        try:
+            obj = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _coerce_planner_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 transition: if planner returned a utterance.v1 shape, fold it into the
+    legacy planner.result.v1 shape the core pipeline still consumes. Non-utterance
+    payloads pass through untouched. D4 / D15~D18 ref: memory/autonomy-redesign-notes.md.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+        return payload
+    body = str(payload.get("body") or "")
+    fenced = _extract_fenced_json(body) or {}
+    first_line = next((line for line in body.splitlines() if line.strip()), "")
+    summary_src = fenced.get("summary") or payload.get("summary") or first_line or "planner utterance"
+    summary = str(summary_src).strip() or "planner utterance"
+    plan_summary_src = fenced.get("plan_summary") or summary
+    plan_summary = str(plan_summary_src).strip() or summary
+    tasks_raw = fenced.get("tasks")
+    tasks: list[dict[str, Any]]
+    if isinstance(tasks_raw, list) and tasks_raw:
+        tasks = [t for t in tasks_raw if isinstance(t, dict)]
+    else:
+        tasks = [
+            {
+                "id": "task-1",
+                "title": summary[:120] or "planner utterance",
+                "acceptance": "derived from planner utterance body",
+                "priority": "medium",
+                "notes": [],
+            }
+        ]
+    risks_raw = fenced.get("risks")
+    risks = [str(r) for r in risks_raw] if isinstance(risks_raw, list) else []
+    return {
+        "summary": summary,
+        "plan_summary": plan_summary,
+        "tasks": tasks,
+        "risks": risks,
+    }
