@@ -909,16 +909,12 @@ def _append_builder_timeline(
     provider_id: str,
 ) -> None:
     """Compose builder utterance body and delegate to _append_role_timeline."""
-    def _bullets(items: list[str]) -> str:
-        clean = [str(i).strip() for i in items if str(i).strip()]
-        return "\n".join(f"- {x}" for x in clean[:10]) if clean else "- (none)"
-
     body = (
         f"{summary}\n\n"
         f"## Change summary\n{change_summary}\n\n"
-        f"## Files changed (cycle {cycle_index})\n{_bullets(files_changed)}\n\n"
-        f"## Artifacts\n{_bullets(artifact_paths)}\n\n"
-        f"## Unresolved\n{_bullets(unresolved)}"
+        f"## Files changed (cycle {cycle_index})\n{_timeline_bullets(files_changed)}\n\n"
+        f"## Artifacts\n{_timeline_bullets(artifact_paths)}\n\n"
+        f"## Unresolved\n{_timeline_bullets(unresolved)}"
     )
     _append_role_timeline(
         runtime,
@@ -926,6 +922,111 @@ def _append_builder_timeline(
         cycle_index=cycle_index,
         body=body,
         next_speaker="verifier_functional",
+        provider_id=provider_id,
+    )
+
+
+def _timeline_bullets(items: list[object]) -> str:
+    clean = [str(i).strip() for i in (items or []) if str(i).strip()]
+    return "\n".join(f"- {x}" for x in clean[:10]) if clean else "- (none)"
+
+
+def _append_verifier_functional_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    result: str,
+    score: float,
+    findings: list[str],
+    evidence: list[str],
+    blocking_issues: list[str],
+    suggested_actions: list[str],
+    provider_id: str,
+) -> None:
+    body = (
+        f"{summary}\n\n"
+        f"## Verdict\nresult={result}, score={float(score):.2f}\n\n"
+        f"## Findings\n{_timeline_bullets(findings)}\n\n"
+        f"## Evidence\n{_timeline_bullets(evidence)}\n\n"
+        f"## Blocking issues\n{_timeline_bullets(blocking_issues)}\n\n"
+        f"## Suggested actions\n{_timeline_bullets(suggested_actions)}"
+    )
+    _append_role_timeline(
+        runtime,
+        role="verifier_functional",
+        cycle_index=cycle_index,
+        body=body,
+        next_speaker="verifier_human",
+        provider_id=provider_id,
+    )
+
+
+def _append_verifier_human_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    result: str,
+    score: float,
+    findings: list[str],
+    strengths: list[str],
+    comparison_notes: list[str],
+    suggested_actions: list[str],
+    provider_id: str,
+) -> None:
+    body = (
+        f"{summary}\n\n"
+        f"## Verdict\nresult={result}, score={float(score):.2f}\n\n"
+        f"## Findings\n{_timeline_bullets(findings)}\n\n"
+        f"## Strengths\n{_timeline_bullets(strengths)}\n\n"
+        f"## Comparison notes\n{_timeline_bullets(comparison_notes)}\n\n"
+        f"## Suggested actions\n{_timeline_bullets(suggested_actions)}"
+    )
+    _append_role_timeline(
+        runtime,
+        role="verifier_human",
+        cycle_index=cycle_index,
+        body=body,
+        next_speaker="orchestrator",
+        provider_id=provider_id,
+    )
+
+
+# Map orchestrator decision to the canonical next speaker for timeline.
+# D5 will replace this with free next_speaker + declare_done once legacy scaffolding is gone.
+_ORCHESTRATOR_NEXT_SPEAKER = {
+    "complete_cycle": "__end__",
+    "needs_iteration": "planner",
+    "blocked": "__end__",
+}
+
+
+def _append_orchestrator_timeline(
+    runtime: RuntimeStore,
+    *,
+    cycle_index: int,
+    summary: str,
+    decision: str,
+    next_state: str,
+    reason: str,
+    unresolved_items: list[str],
+    recommended_next_action: str,
+    provider_id: str,
+) -> None:
+    body = (
+        f"{summary}\n\n"
+        f"## Decision\n{decision} → {next_state}\n\n"
+        f"## Reason\n{reason or '(no reason provided)'}\n\n"
+        f"## Unresolved items\n{_timeline_bullets(unresolved_items)}\n\n"
+        f"## Recommended next action\n{recommended_next_action or '(none)'}"
+    )
+    _append_role_timeline(
+        runtime,
+        role="orchestrator",
+        cycle_index=cycle_index,
+        body=body,
+        next_speaker=_ORCHESTRATOR_NEXT_SPEAKER.get(decision, "planner"),
         provider_id=provider_id,
     )
 
@@ -1295,6 +1396,41 @@ def _run_verifier(
     runtime.write_json(review_path, review_payload)
     artifacts.register(role, f".orch/{review_path}", result.summary)
     runtime.append_event(f"{role}_completed", {"cycle": cycle_index, "summary": result.summary})
+
+    provider_id = roles_config.get(role, "unknown")
+    try:
+        score_val = float(payload.get("score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        score_val = 0.0
+    result_val = str(payload.get("result", "pass") or "pass")
+    findings = [str(f) for f in (payload.get("findings") or [])]
+    suggested_actions = [str(s) for s in (payload.get("suggested_actions") or [])]
+    if role == "verifier_functional":
+        _append_verifier_functional_timeline(
+            runtime,
+            cycle_index=cycle_index,
+            summary=str(result.summary or ""),
+            result=result_val,
+            score=score_val,
+            findings=findings,
+            evidence=[str(e) for e in (payload.get("evidence") or [])],
+            blocking_issues=[str(b) for b in (payload.get("blocking_issues") or [])],
+            suggested_actions=suggested_actions,
+            provider_id=provider_id,
+        )
+    else:
+        _append_verifier_human_timeline(
+            runtime,
+            cycle_index=cycle_index,
+            summary=str(result.summary or ""),
+            result=result_val,
+            score=score_val,
+            findings=findings,
+            strengths=[str(s) for s in (payload.get("strengths") or [])],
+            comparison_notes=[str(c) for c in (payload.get("comparison_notes") or [])],
+            suggested_actions=suggested_actions,
+            provider_id=provider_id,
+        )
     return review_payload
 
 
@@ -1527,6 +1663,17 @@ def _run_orchestrator(
             "recommended_next_action": normalized["recommended_next_action"],
             "summary": str(payload.get("summary") or ""),
         },
+    )
+    _append_orchestrator_timeline(
+        runtime,
+        cycle_index=cycle_index,
+        summary=str(payload.get("summary") or result.summary or ""),
+        decision=decision,
+        next_state=next_state,
+        reason=normalized["reason"],
+        unresolved_items=normalized["unresolved_items"],
+        recommended_next_action=normalized["recommended_next_action"],
+        provider_id=str(roles_config.get("orchestrator", "unknown")),
     )
     return normalized
 

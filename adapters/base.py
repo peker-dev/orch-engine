@@ -249,10 +249,9 @@ class BaseCliAdapter(BaseAdapter):
                 # fields, so the coerced output must pass through normalize so that
                 # fenced-json payloads lacking some fields still validate.
                 # See reviewer finding A-5.
-                if invocation.role == "planner":
-                    payload = _coerce_planner_utterance_to_legacy(payload)
-                elif invocation.role == "builder":
-                    payload = _coerce_builder_utterance_to_legacy(payload)
+                coercer = _UTTERANCE_COERCERS.get(invocation.role)
+                if coercer is not None:
+                    payload = coercer(payload)
                 payload = _normalize_role_payload(invocation.role, payload)
                 _validate_schema(payload, schema)
             except Exception as exc:  # noqa: BLE001
@@ -363,7 +362,21 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "If the objective calls for something that does not yet exist on disk (e.g. objective mentions "
             "'responsive + WCAG AA' but no styles.css or accessibility check has been produced), include that gap "
             "in suggested_actions even when the active task looks done. Never report suggested_actions=[] while "
-            "an obvious objective-level item is still missing."
+            "an obvious objective-level item is still missing.\n\n"
+            "--- Output format (Phase 2 transition — verifier_functional) ---\n"
+            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
+            "(A) Legacy verifier_functional.result.v1 shape: summary, result, score, findings, evidence, blocking_issues, suggested_actions.\n"
+            "(B) PREFERRED utterance.v1 shape:\n"
+            "    {\n"
+            "      \"speaker\": \"verifier_functional\",\n"
+            "      \"body\": \"<markdown: what you tested, what evidence you gathered, what is broken or missing>\",\n"
+            "      \"next_speaker\": \"verifier_human\"\n"
+            "    }\n"
+            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "    ```json\n"
+            "    {\"result\":\"pass|fail|needs_iteration|block\",\"score\":0.0,\"findings\":[],\"evidence\":[],"
+            "\"blocking_issues\":[],\"suggested_actions\":[]}\n"
+            "    ```"
         ),
         "verifier_human": (
             "Review from a human perspective and focus on quality, clarity, polish, and usability. "
@@ -371,7 +384,21 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "whether the active task's acceptance is met. If the objective promises an experience that the "
             "current artifacts clearly do not deliver (placeholder content, missing responsive behavior, broken "
             "links, unverified accessibility), raise it in findings and suggested_actions even if the active "
-            "task itself is technically done."
+            "task itself is technically done.\n\n"
+            "--- Output format (Phase 2 transition — verifier_human) ---\n"
+            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
+            "(A) Legacy verifier_human.result.v1 shape: summary, result, score, findings, strengths, comparison_notes, suggested_actions.\n"
+            "(B) PREFERRED utterance.v1 shape:\n"
+            "    {\n"
+            "      \"speaker\": \"verifier_human\",\n"
+            "      \"body\": \"<markdown: user-perspective read, strengths, weaknesses, suggestions>\",\n"
+            "      \"next_speaker\": \"orchestrator\"\n"
+            "    }\n"
+            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "    ```json\n"
+            "    {\"result\":\"pass|fail|needs_iteration|block\",\"score\":0.0,\"findings\":[],\"strengths\":[],"
+            "\"comparison_notes\":[],\"suggested_actions\":[]}\n"
+            "    ```"
         ),
         "orchestrator": (
             "Decide whether this cycle is complete, should iterate, or is blocked. "
@@ -384,7 +411,22 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "accessibility evidence, real content instead of placeholders) but verifiers missed it, raise it "
             "yourself in unresolved_items and choose needs_iteration. "
             "Use blocked only when the reviews explicitly declare a hard stop or the same failure has repeated "
-            "without progress."
+            "without progress.\n\n"
+            "--- Output format (Phase 2 transition — orchestrator) ---\n"
+            "The engine accepts EITHER of two JSON shapes. Pick (B) when possible.\n"
+            "(A) Legacy orchestrator.result.v1 shape: summary, decision, next_state, reason, unresolved_items, recommended_next_action.\n"
+            "(B) PREFERRED utterance.v1 shape:\n"
+            "    {\n"
+            "      \"speaker\": \"orchestrator\",\n"
+            "      \"body\": \"<markdown: your judgment, reasoning against objective, what blocks or unblocks>\",\n"
+            "      \"next_speaker\": \"planner\"\n"
+            "    }\n"
+            "    Embed a fenced ```json``` block inside body carrying the legacy payload:\n"
+            "    ```json\n"
+            "    {\"decision\":\"complete_cycle|needs_iteration|blocked\","
+            "\"next_state\":\"completed|iterating|blocked\","
+            "\"reason\":\"...\",\"unresolved_items\":[],\"recommended_next_action\":\"...\"}\n"
+            "    ```"
         ),
     }[invocation.role]
     scope_guidance = {
@@ -394,7 +436,9 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "verifier_human": "Do not modify files during review.",
         "orchestrator": "Do not modify files. You are a judgment-only role.",
     }[invocation.role]
-    if invocation.role in {"planner", "builder"}:
+    if invocation.role in {
+        "planner", "builder", "verifier_functional", "verifier_human", "orchestrator"
+    }:
         format_rule = (
             "Return exactly one JSON object. The OUTER envelope must be plain JSON "
             "(no markdown, no outer code fences). Phase 2 transition exception: if you "
@@ -767,6 +811,101 @@ def _coerce_planner_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, An
         "tasks": tasks,
         "risks": risks,
     }
+
+
+def _fenced_list(value: Any) -> list[str] | None:
+    """Return a list of strings if value is a list, else None (so normalize fallbacks run)."""
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return None
+
+
+def _coerce_verifier_functional_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 mirror for verifier_functional. See _coerce_planner_utterance_to_legacy."""
+    if not isinstance(payload, dict):
+        return payload
+    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+        return payload
+    body = str(payload.get("body") or "")
+    fenced = _extract_fenced_json(body) or {}
+    first_line = next((line for line in body.splitlines() if line.strip()), "")
+    summary = str(
+        fenced.get("summary") or payload.get("summary") or first_line or "Functional review completed."
+    ).strip() or "Functional review completed."
+    return {
+        "summary": summary,
+        "result": fenced.get("result"),
+        "score": fenced.get("score"),
+        "findings": _fenced_list(fenced.get("findings")),
+        "evidence": _fenced_list(fenced.get("evidence")),
+        "blocking_issues": _fenced_list(fenced.get("blocking_issues")),
+        "suggested_actions": _fenced_list(fenced.get("suggested_actions")),
+    }
+
+
+def _coerce_verifier_human_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 mirror for verifier_human."""
+    if not isinstance(payload, dict):
+        return payload
+    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+        return payload
+    body = str(payload.get("body") or "")
+    fenced = _extract_fenced_json(body) or {}
+    first_line = next((line for line in body.splitlines() if line.strip()), "")
+    summary = str(
+        fenced.get("summary") or payload.get("summary") or first_line or "Human review completed."
+    ).strip() or "Human review completed."
+    return {
+        "summary": summary,
+        "result": fenced.get("result"),
+        "score": fenced.get("score"),
+        "findings": _fenced_list(fenced.get("findings")),
+        "strengths": _fenced_list(fenced.get("strengths")),
+        "comparison_notes": _fenced_list(fenced.get("comparison_notes")),
+        "suggested_actions": _fenced_list(fenced.get("suggested_actions")),
+    }
+
+
+def _coerce_orchestrator_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 mirror for orchestrator.
+
+    Unlike the verifiers, orchestrator.decision / next_state are enum-valued
+    and the core pipeline hard-fails on unknown values. We therefore inject
+    safe defaults ('needs_iteration' / 'iterating') when the fenced block is
+    missing these keys, rather than letting _normalize_role_payload emit an
+    empty string that would fail validation.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if not _UTTERANCE_V1_KEYS.issubset(payload.keys()):
+        return payload
+    body = str(payload.get("body") or "")
+    fenced = _extract_fenced_json(body) or {}
+    first_line = next((line for line in body.splitlines() if line.strip()), "")
+    summary = str(
+        fenced.get("summary") or payload.get("summary") or first_line or "Orchestrator judged the cycle."
+    ).strip() or "Orchestrator judged the cycle."
+    decision = str(fenced.get("decision") or "").strip() or "needs_iteration"
+    next_state = str(fenced.get("next_state") or "").strip() or "iterating"
+    reason = str(fenced.get("reason") or summary).strip() or summary
+    recommended = str(fenced.get("recommended_next_action") or "").strip()
+    return {
+        "summary": summary,
+        "decision": decision,
+        "next_state": next_state,
+        "reason": reason,
+        "unresolved_items": _fenced_list(fenced.get("unresolved_items")),
+        "recommended_next_action": recommended,
+    }
+
+
+_UTTERANCE_COERCERS = {
+    "planner": lambda p: _coerce_planner_utterance_to_legacy(p),
+    "builder": lambda p: _coerce_builder_utterance_to_legacy(p),
+    "verifier_functional": lambda p: _coerce_verifier_functional_utterance_to_legacy(p),
+    "verifier_human": lambda p: _coerce_verifier_human_utterance_to_legacy(p),
+    "orchestrator": lambda p: _coerce_orchestrator_utterance_to_legacy(p),
+}
 
 
 def _coerce_builder_utterance_to_legacy(payload: dict[str, Any]) -> dict[str, Any]:
