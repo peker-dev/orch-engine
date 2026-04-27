@@ -25,6 +25,12 @@ ENGINE_ROOT = Path(__file__).resolve().parent.parent
 # `_coerce_<role>_utterance_to_legacy` + `_normalize_role_payload` to
 # produce the structured state the rest of the engine still consumes.
 UTTERANCE_SCHEMA_PATH = ENGINE_ROOT / "schemas" / "utterance.v1.json"
+# D13 (Phase 2 P0-E): domain packs ship a per-role natural-language guide
+# at `domains/<id>/guides/<role>.md`. When present, `_render_prompt`
+# splices the guide into the role prompt so domain knowledge actually
+# reaches the LLM. Absence is silently tolerated (legacy domains and the
+# scripted-adapter test surface both run without guides).
+DOMAINS_ROOT = ENGINE_ROOT / "domains"
 _SUPPORTED_ROLES = frozenset(
     {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
 )
@@ -453,11 +459,13 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "payload shown under 'Output format'. The 'no markdown / no fences' rule "
         "still applies to everything outside body.\n"
     )
+    domain_block = _render_domain_guide_block(invocation)
     return (
         f"You are running as orch-engine role '{invocation.role}'.\n"
         + format_rule
         + f"{role_guidance}\n"
-        f"{scope_guidance}\n"
+        + domain_block
+        + f"{scope_guidance}\n"
         f"Objective: {invocation.objective}\n"
         f"Working directory: {Path(invocation.working_directory).resolve()}\n"
         f"Context summary: {_summarize_context(invocation.context)}\n"
@@ -465,6 +473,78 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         f"Required top-level keys: {', '.join(required_keys)}\n"
         "If a list field has nothing to report, return an empty array.\n"
         "If you are unsure, choose the safest schema-valid response.\n"
+    )
+
+
+def _resolve_domain_id(working_directory: str | Path) -> str | None:
+    """Best-effort domain id lookup from a target project's .orch state.
+
+    Returns the domain id string, or None when (a) no .orch state exists
+    (scripted-adapter test surface), (b) the state is malformed, or (c)
+    the domain key is absent. Callers MUST tolerate None — guide splicing
+    is opportunistic, not required.
+    """
+    try:
+        target = Path(working_directory).resolve()
+    except (OSError, ValueError):
+        return None
+    candidates = (
+        target / ".orch" / "runtime" / "session.json",
+        target / ".orch" / "config" / "project.yaml",
+    )
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if path.name == "session.json":
+            try:
+                doc = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            value = doc.get("domain") if isinstance(doc, dict) else None
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        else:
+            # project.yaml fallback: extract `domain: <id>` under `project:`.
+            # We avoid importing the project's yaml shim here to keep this
+            # helper dependency-free — a single naive scan is enough for
+            # the only key we care about.
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if line.startswith("domain:"):
+                    value = line.split(":", 1)[1].strip().strip("'\"")
+                    if value:
+                        return value
+    return None
+
+
+def _render_domain_guide_block(invocation: Invocation) -> str:
+    """Return a prompt block embedding the domain's per-role guide, or ''.
+
+    Produces an empty string when no domain id is resolvable, when the
+    domain has no `guides/` directory yet, or when the role's guide file
+    is missing. This keeps legacy domains and the scripted-adapter test
+    surface working without any guide files.
+    """
+    domain_id = _resolve_domain_id(invocation.working_directory)
+    if not domain_id:
+        return ""
+    guide_path = DOMAINS_ROOT / domain_id / "guides" / f"{invocation.role}.md"
+    if not guide_path.exists():
+        return ""
+    try:
+        body = guide_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not body:
+        return ""
+    return (
+        f"--- Domain guidance ({domain_id}, role={invocation.role}) ---\n"
+        f"{body}\n"
+        f"--- End domain guidance ---\n"
     )
 
 

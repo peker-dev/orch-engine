@@ -1,9 +1,18 @@
-"""Static coherence checks for the 5 domain packs' rubric sections.
+"""Static coherence checks for the 5 domain packs.
 
-B 2단계 (e): `scoring` / `verify_functional` / `verify_human` / `guardrails`
-섹션이 서로 일관적이고 스키마 규약을 지키는지 LLM 없이 정적 점검한다.
+Runs in **dual mode** (D13 / 19차 Phase 2 P0-E):
+
+* Legacy domain pack (no `guides/` dir): the original yaml-body coherence
+  checks (E1~E8 + W1) still run. This keeps the four un-migrated domain
+  packs (investment_research / music_video / novel / unity) green while
+  D13 rolls out one domain at a time.
+* Migrated domain pack (has `guides/` dir): yaml-body checks are skipped;
+  guide md presence + minimum substance checks (G1~G4) run instead. The
+  domain's `domain.yaml` should contain only `meta`.
 
 Errors (any -> rc=1):
+
+  Legacy mode (no guides/):
     E1  meta.domain_id matches directory name
     E2  scoring.dimensions set equals keys(scoring.weights)
     E3  sum(scoring.weights.values()) in [0.99, 1.01]
@@ -18,7 +27,18 @@ Errors (any -> rc=1):
     E8  no duplicate entries (whitespace-normalized, case-insensitive) inside
         the structured list arrays listed in _DUP_CHECK_PATHS
 
+  Migrated mode (has guides/):
+    G1  meta.domain_id matches directory name
+    G2  all 5 role guide files present (planner / builder / verifier_functional /
+        verifier_human / orchestrator)
+    G3  each guide is at least _MIN_GUIDE_LINES (40) non-empty lines —
+        blocks empty stubs from sneaking in
+    G4  each guide has at least one '# ' H1 and one '## ' H2 header —
+        the agreed style is "header + paragraph + bullet mixed", not raw prose
+
 Warnings (printed, do not flip rc):
+
+  Legacy mode:
     W1  blocking_failures and pass_fail_rules share zero tokens — one side
         may have been edited without syncing the other
 
@@ -47,6 +67,15 @@ DOMAINS_ROOT = ENGINE_ROOT / "domains"
 
 DOMAINS = ("web", "unity", "novel", "music_video", "investment_research")
 
+_REQUIRED_GUIDE_ROLES = (
+    "planner",
+    "builder",
+    "verifier_functional",
+    "verifier_human",
+    "orchestrator",
+)
+_MIN_GUIDE_LINES = 40
+
 _DUP_CHECK_PATHS: tuple[tuple[str, ...], ...] = (
     ("scoring", "blocking_failures"),
     ("verify_functional", "required_checks"),
@@ -56,12 +85,13 @@ _DUP_CHECK_PATHS: tuple[tuple[str, ...], ...] = (
     ("builder", "execution_rules"),
 )
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9\uAC00-\uD7A3]{2,}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9가-힣]{2,}")
 
 
 @dataclass(slots=True)
 class DomainReport:
     domain: str
+    mode: str = "legacy"  # "legacy" or "migrated"
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -84,6 +114,10 @@ def _load_domain(domain: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _has_guides_dir(domain: str) -> bool:
+    return (DOMAINS_ROOT / domain / "guides").is_dir()
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()).lower()
 
@@ -95,8 +129,9 @@ def _tokenize(text: str) -> set[str]:
 def _check_meta(domain: str, data: dict, report: DomainReport) -> None:
     declared = _get(data, ("meta", "domain_id"))
     if declared != domain:
+        code = "G1" if report.mode == "migrated" else "E1"
         report.errors.append(
-            f"E1 meta.domain_id={declared!r} but folder name is {domain!r}"
+            f"{code} meta.domain_id={declared!r} but folder name is {domain!r}"
         )
 
 
@@ -225,8 +260,7 @@ def _check_blocking_vs_passfail_tokens(data: dict, report: DomainReport) -> None
         )
 
 
-_CHECKS = (
-    _check_meta,
+_LEGACY_CHECKS = (
     _check_scoring,
     _check_required_arrays,
     _check_hard_fail_clause,
@@ -236,8 +270,41 @@ _CHECKS = (
 )
 
 
+def _check_guide_files(domain: str, report: DomainReport) -> None:
+    """Migrated-mode checks G2~G4: guide presence, minimum lines, headers."""
+    guides_root = DOMAINS_ROOT / domain / "guides"
+    for role in _REQUIRED_GUIDE_ROLES:
+        guide_path = guides_root / f"{role}.md"
+        if not guide_path.exists():
+            report.errors.append(f"G2 missing guide: guides/{role}.md")
+            continue
+        try:
+            text = guide_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            report.errors.append(f"G2 cannot read guides/{role}.md: {exc}")
+            continue
+        non_empty_lines = [line for line in text.splitlines() if line.strip()]
+        if len(non_empty_lines) < _MIN_GUIDE_LINES:
+            report.errors.append(
+                f"G3 guides/{role}.md has {len(non_empty_lines)} non-empty lines, "
+                f"minimum is {_MIN_GUIDE_LINES}"
+            )
+        has_h1 = any(line.startswith("# ") for line in non_empty_lines)
+        has_h2 = any(line.startswith("## ") for line in non_empty_lines)
+        if not has_h1 or not has_h2:
+            missing = []
+            if not has_h1:
+                missing.append("'# ' H1")
+            if not has_h2:
+                missing.append("'## ' H2")
+            report.errors.append(
+                f"G4 guides/{role}.md missing required headers: {', '.join(missing)}"
+            )
+
+
 def _run_domain(domain: str) -> DomainReport:
-    report = DomainReport(domain=domain)
+    migrated = _has_guides_dir(domain)
+    report = DomainReport(domain=domain, mode="migrated" if migrated else "legacy")
     try:
         data = _load_domain(domain)
     except FileNotFoundError:
@@ -248,8 +315,11 @@ def _run_domain(domain: str) -> DomainReport:
         return report
 
     _check_meta(domain, data, report)
-    for check in _CHECKS[1:]:
-        check(data, report)
+    if migrated:
+        _check_guide_files(domain, report)
+    else:
+        for check in _LEGACY_CHECKS:
+            check(data, report)
     return report
 
 
@@ -288,7 +358,7 @@ def main() -> int:
     warn_count = 0
     for r in reports:
         status = "OK  " if r.ok else "FAIL"
-        print(f"  {status}  {r.domain}")
+        print(f"  {status}  {r.domain}  [{r.mode}]")
         for err in r.errors:
             print(f"    [ERROR] {err}")
             error_count += 1
