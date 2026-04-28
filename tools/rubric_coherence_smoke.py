@@ -31,8 +31,10 @@ Errors (any -> rc=1):
     G1  meta.domain_id matches directory name
     G2  all 5 role guide files present (planner / builder / verifier_functional /
         verifier_human / orchestrator)
-    G3  each guide is at least _MIN_GUIDE_LINES (40) non-empty lines —
-        blocks empty stubs from sneaking in
+    G3  each guide is at least _MIN_GUIDE_LINES (25) non-empty lines —
+        blocks empty stubs from sneaking in. The value was lowered in 20차 D13
+        v3 slimming pass: domain guides should be "minimum essentials only", and
+        a 40-line floor incentivizes padding rather than trimming.
     G4  each guide has at least one '# ' H1 and one '## ' H2 header —
         the agreed style is "header + paragraph + bullet mixed", not raw prose
 
@@ -74,7 +76,7 @@ _REQUIRED_GUIDE_ROLES = (
     "verifier_human",
     "orchestrator",
 )
-_MIN_GUIDE_LINES = 40
+_MIN_GUIDE_LINES = 25
 
 _DUP_CHECK_PATHS: tuple[tuple[str, ...], ...] = (
     ("scoring", "blocking_failures"),
