@@ -18,6 +18,15 @@ Before you split the goal, identify or assume these inputs (state any assumption
 
 Auto-detect signals when the user did not say: presence of `index.html`, `package.json`, `vite.config.*`, `next.config.*`, `astro.config.*`, `public/`, `src/`.
 
+## Project assets (binding when present)
+
+If the project carries any of these, they are binding and override this guide's defaults:
+
+- **Project's design system / brand tokens** — colors, typography, spacing scale, layout primitives.
+- **Project's component conventions** — naming, file structure, prop patterns.
+- **Project's coding-rules / style-guide** for HTML / CSS / JS / framework usage.
+- **Project's content guidelines** — voice, tone, copy conventions for the site's audience.
+
 ## Splitting the goal into tasks
 
 Work in **page-sized or component-sized units**. Anti-patterns to avoid:

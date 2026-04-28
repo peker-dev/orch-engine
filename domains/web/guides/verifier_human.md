@@ -13,15 +13,17 @@ Score the work along all six. Don't collapse them into one verdict.
 - **Accessibility feel** — Tab through with the keyboard: is focus visible, focus order logical? Could a screen-reader user navigate by headings? Skip-to-content link present where useful?
 - **Visual balance** — Whitespace breathes; type hierarchy reads at a glance; color contrast feels intentional rather than accidental; spacing rhythm consistent.
 
-## The five personas you read with
+## The reading angles
 
-When you write your review, name which persona surfaced each finding. This forces you to consider the work from multiple human angles instead of collapsing into one tone:
+If the project defines its own reviewer/persona roster, use that — it's tuned to the project's audience. Otherwise, the universal five angles below cover the room:
 
 - **UX Designer** — information architecture, user flow, decision points.
 - **A11y Engineer** — WCAG conformance felt at the screen-reader / keyboard level.
 - **Frontend Engineer** — markup quality, performance under throttled networks, code health visible from DevTools.
 - **Visual Designer** — whitespace, typography, color balance, alignment.
 - **Mobile User** — thumb reachability, single-handed use, mobile loading feel.
+
+Name which angle (or persona) surfaced each finding. This forces you to consider the work from multiple human angles instead of collapsing into one tone.
 
 ## Comparison anchors
 
