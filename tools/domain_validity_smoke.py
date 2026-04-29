@@ -6,7 +6,7 @@ pass/fail 판별을 실제로 해내는지를 결정적으로 증명한다. LLM 
 
 ## 지원 도메인
 - `web`: viewport / lang / img alt / h1 count / HTML parse / responsive evidence
-- `music_video`: cross_stage_file_placement / persona_coverage_missing / confirmed_setting_drift
+- `music_video`: cross_stage_file_placement / confirmed_setting_drift
 - `investment_research`: missing_report_section / emotional_qualifier / antithesis_insufficient / sources_insufficient
 - `unity`: project_version_missing / webgl_incompat_api / missing_script_reference
 - `novel`: banned_emotion_adjective / paragraph_too_long / abstract_phrasing
@@ -204,8 +204,6 @@ _MV_STAGE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("release_plan", "06_최종"),
 )
 
-_MV_PERSONAS = ("서정아", "한비트", "윤프로", "채원", "민수")
-
 _GENRE_LINE = re.compile(r"(?:장르|genre)\s*[:：]\s*([^\s(（]+)", re.IGNORECASE)
 
 
@@ -223,15 +221,7 @@ def _check_music_video(sample_dir: Path) -> list[str]:
                 violations.add("cross_stage_file_placement")
                 break
 
-    # Rule 2: persona coverage on meeting logs
-    for path in md_files:
-        lower = path.name.lower()
-        if lower.startswith("meeting") or "회의" in path.name:
-            text = path.read_text(encoding="utf-8")
-            if not all(persona in text for persona in _MV_PERSONAS):
-                violations.add("persona_coverage_missing")
-
-    # Rule 3: confirmed setting drift (genre)
+    # Rule 2: confirmed setting drift (genre)
     overview = sample_dir / "memory" / "project-overview.md"
     if overview.exists():
         overview_text = overview.read_text(encoding="utf-8")

@@ -228,6 +228,10 @@ def _build_command(
 
     if provider == "codex":
         sandbox_mode = "workspace-write" if writes_needed else "read-only"
+        # Do NOT pass `--output-schema` — production CodexCliAdapter dropped it
+        # (see adapters/codex_cli.py) because it routes to OpenAI strict
+        # response_format and rejects utterance.v1 features. Schema conformance
+        # is enforced by prompt + engine-side _validate_schema.
         return [
             "codex",
             "exec",
@@ -237,8 +241,6 @@ def _build_command(
             "--skip-git-repo-check",
             "--sandbox",
             sandbox_mode,
-            "--output-schema",
-            str(schema_path),
             "-o",
             str(result_path),
         ]

@@ -1,13 +1,13 @@
 {
   "meta": {
     "domain_id": "investment_research",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "display_name": "Investment Research",
-    "summary": "KR/US 주식시장 대상 인과·확률 기반 분석 리포트 생성 워크플로 (INTP Market Architect 페르소나 준수). 감정 수식어 배제, 인과 체인 + 반증 + exit condition 강제.",
+    "summary": "주식 분석 리포트 평가축. 1차 출처 ≥2, 인과 vs narrative 구분, 반증 ≥3, exit condition + EV, 밸류에이션 멀티플, bias 경고, real-time 거래 추천 금지. 프로젝트가 페르소나·사고 프레임워크·리포트 포맷·체크리스트를 정의했으면 그것이 우선.",
     "default_mode": "retrofit",
     "maturity": "calibrated",
     "guides_dir": "guides",
     "guides_format": "natural_language_md",
-    "notes": "D13 이행 (2026-04-27). 기존 16 섹션의 구조화된 노하우는 guides/<role>.md 5개로 자연어 재구성됨. 엔진은 domains/<d>/guides/<role>.md 를 prompt 에 끼워넣음 (adapters/base.py._render_prompt)."
+    "notes": "D13 v3 (2026-04-28). 가이드는 guides/<role>.md 5개 자연어. 엔진은 adapters/base.py._render_prompt 가 prompt 에 합류."
   }
 }

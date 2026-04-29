@@ -5,26 +5,25 @@
 
 ## Rubric 커버리지 매트릭스
 
-| domain.yaml 규칙 (출처) | Checker violation ID | 샘플로 실증됨 |
+장르 보편 평가축 중 **정적으로 판정 가능한** 항목만 fixture 로 박제. 페르소나/PD/리뷰 인원 같은 프로젝트 자산 차원 룰은 정적 fixture 가 아니라 프로젝트의 가이드 / `.orch/` 자료에 정의 (도메인 v3 hook 패턴).
+
+| 평가축 | Checker violation ID | 샘플로 실증됨 |
 |---|---|---|
-| `verify_functional.pass_fail_rules`: cross-stage file placement | `cross_stage_file_placement` | `fail_01_cross_stage` |
-| `verify_functional.pass_fail_rules`: persona missing from meeting | `persona_coverage_missing` | `fail_02_missing_persona` |
-| `verify_functional.pass_fail_rules`: confirmed setting silently changed | `confirmed_setting_drift` | `fail_03_genre_drift` |
-| `scoring.blocking_failures`: vocal infeasible for PD | — | **범위 외** (LLM/사람 판단) |
-| `scoring.blocking_failures`: consent-less voice cloning source | — | **범위 외** (승인 로그 메타검사 필요) |
+| 스테이지 폴더 ↔ 파일 배치 정합 | `cross_stage_file_placement` | `fail_01_cross_stage` |
+| 확정 장르가 후속 스테이지에서 무단 변경 | `confirmed_setting_drift` | `fail_03_genre_drift` |
+| 보컬 feasibility (음역·난이도) | — | **범위 외** (LLM/사람 판단) |
+| 보이스 클로닝 동의 / 출처 추적 | — | **범위 외** (승인 로그 메타검사 필요) |
 
 ### 정적 검사 상세
 
 - **`cross_stage_file_placement`**: 파일명 패턴 ↔ 지정 스테이지 폴더 매핑.
   예: `suno_prompt_*` → `04_작곡/`, `*_lyrics_*` → `03_작사/`, `mv_storyboard_*` → `05_뮤직비디오/`.
-- **`persona_coverage_missing`**: `meeting_*` 또는 파일명에 `회의`가 들어간 `.md`는
-  5 페르소나(서정아 / 한비트 / 윤프로 / 채원 / 민수) 전부 언급해야 함.
 - **`confirmed_setting_drift`**: `memory/project-overview.md`가 선언한 장르와
   다른 스테이지 파일의 장르 선언이 불일치하면 위반.
 
 ### 알려진 갭
 
-- **`vocal_infeasible`**: PD의 음역·난이도 판단이 필요해 정적 검사 불가. LLM 기반 검증 단계 필요.
+- **`vocal_infeasible`**: 음역·난이도 판단이 필요해 정적 검사 불가. LLM 기반 검증 단계.
 - **`consent-less_voice_cloning`**: 승인 로그 메타데이터 검사가 필요하며 현재 스코프 외.
 - **Theme drift**: 장르 외 "테마" 정합성은 의미론 비교라 정적으로는 근사치만 가능. 향후 확장.
 

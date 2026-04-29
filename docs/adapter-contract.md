@@ -176,14 +176,13 @@ help 기준 확인된 핵심 옵션:
 - `-` 를 통한 stdin prompt 입력
 - `--cd`
 - `--skip-git-repo-check`
-- `--output-schema <FILE>`
 - `-o <FILE>`
 - `--json`
 
 권장 호출 형태:
 
 ```text
-codex exec - --cd <working_directory> --skip-git-repo-check --sandbox <mode> --output-schema <schema-file> -o <result-file>
+codex exec - --cd <working_directory> --skip-git-repo-check --sandbox <mode> -o <result-file>
 ```
 
 `--sandbox` role별 매핑 (현 구현 `adapters/codex_cli.py`):
@@ -193,7 +192,9 @@ codex exec - --cd <working_directory> --skip-git-repo-check --sandbox <mode> --o
 원칙:
 - prompt는 stdin으로 전달
 - 최종 메시지는 `-o` 파일에서 읽는 것을 기본 경로로 사용
-- `Codex CLI`의 structured output schema는 object의 `properties`와 `required`를 엄격하게 맞춰야 함
+- 현재 production adapter는 `--output-schema`를 전달하지 않음
+- 이유: Codex CLI가 이 값을 OpenAI strict response_format으로 연결하면서 `utterance.v1`의 optional key / schema feature와 충돌한 실측이 있었음
+- schema 적합성은 prompt + 엔진 측 `_validate_schema` / `_check_utterance_invariants`에서 검증
 - `--json`은 event stream 디버깅용일 때만 사용
 - stderr 경고는 길 수 있으므로, 성공 판정은 종료 코드 + result 파일 + schema 검증 기준으로 봅니다.
 - planner/verifier_human은 파일 수정 없이 판정만 하므로 `read-only`, 실행/수정이 필요한 builder/verifier_functional에만 `workspace-write` 권한을 허용합니다.

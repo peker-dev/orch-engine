@@ -1,13 +1,13 @@
 {
   "meta": {
     "domain_id": "music_video",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "display_name": "Music & Music Video",
-    "summary": "페르소나 5인 토론 기반 발라드 작사/작곡 + AI 보이스 클로닝 + AI 실사 뮤직비디오 제작 워크플로 (6단계 폴더 파이프라인). PD = 사용자 본인.",
+    "summary": "음원·뮤직비디오 제작 평가축. 스테이지 게이트, 보컬 feasibility, 정서 일관성, AI 도구 metadata, 음절-멜로디 정합, 시각 언어. 프로젝트가 페르소나·PD·폴더 컨벤션을 정의했으면 그것이 우선.",
     "default_mode": "retrofit",
     "maturity": "calibrated",
     "guides_dir": "guides",
     "guides_format": "natural_language_md",
-    "notes": "D13 이행 (2026-04-27). 기존 16 섹션의 구조화된 노하우는 guides/<role>.md 5개로 자연어 재구성됨. 6 stage pipeline + 5 personas (서정아/한비트/윤프로/채원/민수) 보존."
+    "notes": "D13 v3 (2026-04-28). 가이드는 guides/<role>.md 5개 자연어. 장르 보편 평가축 + 프로젝트 자산 hook 패턴."
   }
 }

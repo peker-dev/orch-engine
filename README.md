@@ -122,19 +122,19 @@ verifier_human 이 handoff 모드면:
 
 ## 도메인 팩
 
-`domains/` 아래 5개 팩이 v0.2.0 calibrated 상태입니다. 각 팩은 SCHEMA-A1 15 섹션을 모두 채워 planner / builder / verifier가 해당 도메인의 기준으로 판정하도록 유도합니다.
+`domains/` 아래 5개 팩이 v0.3.1 (D13 v3 슬림화) 상태입니다. 각 팩은 5 역할 자연어 가이드 (`guides/<role>.md`) 로 도메인 지혜를 prompt 에 흘립니다 (`adapters/base.py._render_prompt`). 도메인 자체는 **장르 보편 평가축만** 두고, 프로젝트 자산 (페르소나·로스터·폴더 컨벤션·writing-principles 등) 은 "프로젝트가 정의했으면 그것이 우선" hook 패턴으로 흡수합니다.
 
-| 도메인 | 용도 |
+| 도메인 | 장르 보편 평가축 |
 |---|---|
-| `web` | PC/모바일 반응형 웹. 정적 HTML부터 SPA/SSR까지. WCAG AA + Lighthouse 90+ 기준 내장 |
-| `unity` | Unity 산업 클라이언트 (URP/HDRP + Windows Standalone/WebGL + PLC/REST/WebSocket) |
-| `novel` | 현대 판타지 장편 웹소설 집필 (페르소나 6인 회의 + 문장 위계 + Show-don't-tell) |
-| `music_video` | 발라드 작사/작곡 + AI 뮤직비디오 (6단계 폴더 파이프라인 + 페르소나 5인) |
-| `investment_research` | KR/US 주식 시장 분석 리포트 (INTP Market Architect 페르소나 + 6섹션 리포트 + 5체크리스트) |
+| `web` | 시맨틱 HTML / WCAG AA / Core Web Vitals / Lighthouse / viewport·lang·alt·heading |
+| `unity` | build / MonoBehaviour 라이프사이클 / render pipeline / .meta GUID / WebGL·mobile·console 제약 / Addressables / Localization / GC alloc |
+| `novel` | Show-don't-tell / 사이다 cadence / 매 화 훅 / 모바일 가독성 / 떡밥 균형 / 시점 일관성 |
+| `music_video` | 스테이지 게이트 / 보컬 feasibility / 정서 일관성 / AI 도구 metadata / 음절-멜로디 정합 / 시각 언어 |
+| `investment_research` | 1차 출처 ≥2 / 인과 vs narrative / 반증 ≥3 / exit condition + EV / 밸류에이션 멀티플 / bias 경고 / real-time 거래 추천 금지 |
 
-새 도메인 팩을 만들려면 `domains/schema/schema-a1.yaml`의 15 섹션 구조를 참조하세요.
+새 도메인 팩을 만들려면 `domains/<도메인>/domain.yaml` (meta 만) + `domains/<도메인>/guides/<role>.md` 5개를 두면 됩니다. `rubric_coherence_smoke` 가 G1~G4 (meta·가이드 존재·최소 라인·헤더) 를 검사합니다.
 
-> **주의**: 도메인 yaml 의 `limits.cycle_limits.max_cycles` 및 `limits.auto_stop_rules.stop_on_stagnation` 은 Phase 2 P1-5-A 부터 **엔진이 읽지 않습니다**. 사이클 종료 판정 전권은 orchestrator LLM 에 있습니다. 두 필드는 도메인 팩 저자가 "합리적 예산"을 선언하는 용도로만 유지하며 (`rubric_coherence_smoke` E7 이 스키마 존재 여부만 검사), 값 변경은 현재 런타임 동작에 영향 없습니다.
+> **주의**: 도메인 yaml 은 `meta` 블록만 사용합니다. `scoring.weights` / `scoring.thresholds` / `limits.cycle_limits.max_cycles` / `limits.auto_stop_rules.stop_on_stagnation` 같은 구조화 값은 D13 v3 (20차) 에서 폐기되었습니다. 사이클 종료 판정 전권은 orchestrator LLM 에 있습니다.
 
 ---
 
@@ -162,8 +162,9 @@ python -m tools.orchestrator_smoke      # orchestrator feedback loop
 python -m tools.quota_smoke             # quota-aware wait-and-resume
 python -m tools.timeline_smoke          # utterance.v1 timeline append
 python -m tools.arbitration_smoke       # orchestrator decision → next_speaker 라우팅
+python -m tools.schema_utils_smoke      # utterance.v1 balanced-brace scanner / invariants
 python -m tools.domain_validity_smoke   # 도메인 팩 validator 골든 샘플
-python -m tools.rubric_coherence_smoke  # 도메인 rubric 구조 정합성
+python -m tools.rubric_coherence_smoke  # 도메인 meta·가이드 정합성
 ```
 
 실제 AI로 완전 E2E를 돌리려면 프로젝트 루트에서 `tools/adapter_probe.py --live`를 참조.
