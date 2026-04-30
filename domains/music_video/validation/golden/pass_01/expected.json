@@ -2,5 +2,5 @@
   "domain": "music_video",
   "label": "pass",
   "expected_violations": [],
-  "note": "6단계 폴더 파이프라인 정상. 파일 배치 정합, 장르 일관."
+  "note": "스테이지 게이트 정상 통과. 파일 배치 정합, 장르 일관."
 }

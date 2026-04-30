@@ -89,6 +89,11 @@ def _probe_single_role(args: argparse.Namespace, role: str) -> int:
         "context_summary": args.context_summary,
         "input_files": [],
         "write_scope": [],
+        # Preview-only: kept here so request.json shows which schema this probe
+        # was rendered against. The real codex_cli command (P0-R 5, 21차) no
+        # longer passes `--output-schema` — invariants are enforced by the engine
+        # via _check_utterance_invariants. Do not be confused if command.json
+        # has no matching `--output-schema` flag.
         "output_schema_path": str(role_schema_path),
         "timeout_sec": _default_timeout(role),
     }
