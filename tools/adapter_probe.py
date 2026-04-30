@@ -232,7 +232,10 @@ def _build_command(
         ]
 
     if provider == "codex":
-        sandbox_mode = "workspace-write" if writes_needed else "read-only"
+        # P0-R 7 옵션 A (22차 세션 2): writes_needed 역할은 Unity batchmode 같은
+        # 외부 시스템을 spawn 해야 하는데 workspace-write 의 파일 삭제 차단이
+        # 발목을 잡아 danger-full-access 로 격상. 자세한 이유는 adapters/codex_cli.py.
+        sandbox_mode = "danger-full-access" if writes_needed else "read-only"
         # Do NOT pass `--output-schema` — production CodexCliAdapter dropped it
         # (see adapters/codex_cli.py) because it routes to OpenAI strict
         # response_format and rejects utterance.v1 features. Schema conformance

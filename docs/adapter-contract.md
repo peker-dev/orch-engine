@@ -186,8 +186,8 @@ codex exec - --cd <working_directory> --skip-git-repo-check --sandbox <mode> -o 
 ```
 
 `--sandbox` role별 매핑 (현 구현 `adapters/codex_cli.py`):
-- `planner`, `verifier_human`: `read-only`
-- `builder`, `verifier_functional`: `workspace-write`
+- `planner`, `verifier_human`, `orchestrator`: `read-only`
+- `builder`, `verifier_functional`: `danger-full-access` (P0-R 7 옵션 A, 22차 세션 2)
 
 원칙:
 - prompt는 stdin으로 전달
@@ -197,7 +197,8 @@ codex exec - --cd <working_directory> --skip-git-repo-check --sandbox <mode> -o 
 - schema 적합성은 prompt + 엔진 측 `_validate_schema` / `_check_utterance_invariants`에서 검증
 - `--json`은 event stream 디버깅용일 때만 사용
 - stderr 경고는 길 수 있으므로, 성공 판정은 종료 코드 + result 파일 + schema 검증 기준으로 봅니다.
-- planner/verifier_human은 파일 수정 없이 판정만 하므로 `read-only`, 실행/수정이 필요한 builder/verifier_functional에만 `workspace-write` 권한을 허용합니다.
+- planner/verifier_human/orchestrator는 파일 수정 없이 판정만 하므로 `read-only`. 실행·수정이 필요한 builder/verifier_functional은 `danger-full-access`로 격상한 상태.
+- 격상 사유: `workspace-write`는 워크스페이스 내 파일 *생성*은 허용하지만 *삭제*는 codex 정책으로 차단되어, Unity batchmode가 시동 중 파일 삭제를 시도할 때 "project folder is read only"로 abort됨 (`test-phase5-unity` cycle 3 stderr `codex_core::tools::router: ...Remove-Item... rejected: blocked by policy`). 응급 처치이며 장기 정답은 옵션 C — Unity 같은 무거운 외부 시스템을 codex 외부에서 엔진이 직접 spawn하는 표준 runner로 분리 (`memory/next-work.md` P0-R 7).
 
 ---
 

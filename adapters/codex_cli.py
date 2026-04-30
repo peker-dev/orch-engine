@@ -19,7 +19,18 @@ class CodexCliAdapter(BaseCliAdapter):
         schema_text: str,
         provider_result_path: Path,
     ) -> tuple[list[str], bool]:
-        sandbox_mode = "workspace-write" if invocation.role in {"builder", "verifier_functional"} else "read-only"
+        # P0-R 7 옵션 A (22차 세션 2, 2026-04-30): builder / verifier_functional 은
+        # 무거운 외부 시스템 (Unity batchmode 등) 을 spawn 해야 하는 역할이라
+        # codex 의 workspace-write sandbox 가 파일 *삭제* 를 차단하는 정책에 부딪힘.
+        # Unity 가 시동 중 파일 삭제 시도 → "project folder is read only" → batchmode abort.
+        # 증거: test-phase5-unity cycle 3 stderr (2026-04-29) 의
+        # `codex_core::tools::router: ...Remove-Item... rejected: blocked by policy`.
+        # 응급 처치로 두 역할만 danger-full-access 로 격상. 장기 정답은 옵션 C
+        # (엔진 표준 external runner 로 Unity 호출 분리 — `memory/next-work.md` P0-R 7).
+        if invocation.role in {"builder", "verifier_functional"}:
+            sandbox_mode = "danger-full-access"
+        else:
+            sandbox_mode = "read-only"
         # Do NOT pass `--output-schema`. Codex CLI wires that flag into OpenAI's
         # strict `response_format`, which rejects JSON Schema features we rely on
         # for utterance.v1 (optional keys without being in `required`, allOf, etc.).
