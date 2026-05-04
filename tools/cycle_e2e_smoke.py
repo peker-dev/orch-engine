@@ -18,6 +18,8 @@ Scenarios (post Phase 2 P1-5):
     - declare_done_forces_orchestrator      : D5 rule #1
     - max_utterances_blocks_session         : safety cap → blocked
     - orchestrator_disagree_resumes_cycle   : D5 P0-R 1 — disagree → next_speaker → agree
+    - orchestrator_disagree_to_end_blocks_cycle : disagree + __end__ 모순 입력 가드
+    - orchestrator_disagree_routes_to_handoff : disagree → verifier_human (handoff) → pause
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -1007,6 +1009,180 @@ def _scenario_orchestrator_disagree_resumes_cycle(sandbox: Path) -> ScenarioResu
     )
 
 
+def _install_role_adapters(role_adapters: dict[str, ScriptedAdapter]) -> None:
+    """`_install_scripted_adapters` 와 같은 inspect-based 라우팅을 임의 role_adapters
+    딕셔너리에 적용. StatefulOrchestratorAdapter 등 시나리오 전용 adapter 를 섞을 때 사용.
+    """
+
+    def fake_build_adapter(_name: str, *, role_adapters=role_adapters):
+        import inspect
+
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back  # type: ignore[union-attr]
+            if caller is not None:
+                fn_name = caller.f_code.co_name
+                role_map = {
+                    "_run_planner": "planner",
+                    "_run_builder": "builder",
+                    "_run_orchestrator": "orchestrator",
+                }
+                if fn_name in role_map:
+                    return role_adapters[role_map[fn_name]]
+                if fn_name == "_run_verifier":
+                    role_arg = caller.f_locals.get("role")
+                    if role_arg in role_adapters:
+                        return role_adapters[role_arg]
+        finally:
+            del frame
+        raise RuntimeError("install_role_adapters could not resolve target role")
+
+    app._build_adapter = fake_build_adapter  # type: ignore[assignment]
+
+
+def _scenario_orchestrator_disagree_to_end_blocks_cycle(sandbox: Path) -> ScenarioResult:
+    """모순 입력 가드: orchestrator arbitration=disagree 인데 next_speaker=__end__
+    이면 AdapterExecutionError 로 cycle 을 BLOCKED 처리.
+    """
+    target = sandbox / "orch-disagree-to-end"
+    _init_project(target)
+
+    plan = [
+        {
+            "functional": 0.7,
+            "human": 0.7,
+            "result": "pass",
+            "utterances": {
+                "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+            },
+        }
+    ]
+    role_adapters: dict[str, ScriptedAdapter] = {
+        "planner": ScriptedAdapter("planner", plan),
+        "builder": ScriptedAdapter("builder", plan),
+        "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+        "verifier_human": ScriptedAdapter("verifier_human", plan),
+        "orchestrator": StatefulOrchestratorAdapter(
+            [
+                {
+                    "arbitration": "disagree",
+                    "next_speaker": "__end__",
+                    "decision": "needs_iteration",
+                    "next_state": "iterating",
+                    "reason": "모순 입력 (disagree + __end__)",
+                },
+            ]
+        ),
+    }
+    _install_role_adapters(role_adapters)
+
+    rc = _run_cycle(target)
+    if rc != 2:
+        return ScenarioResult(
+            "orchestrator_disagree_to_end_blocks_cycle",
+            False,
+            f"expected rc=2 (BLOCKED), got rc={rc}",
+        )
+    session = _read_session(target)
+    if session.get("state") != "blocked":
+        return ScenarioResult(
+            "orchestrator_disagree_to_end_blocks_cycle",
+            False,
+            f"state={session.get('state')} != blocked",
+        )
+    return ScenarioResult(
+        "orchestrator_disagree_to_end_blocks_cycle",
+        True,
+        "disagree + next_speaker=__end__ 모순 입력이 명시 에러로 BLOCKED 처리됨",
+    )
+
+
+def _scenario_orchestrator_disagree_routes_to_handoff(sandbox: Path) -> ScenarioResult:
+    """disagree → next_speaker=verifier_human (+ workflow.human_review_mode=handoff) 시
+    cycle 이 일시정지 (handoff_active) 로 진입하고, reviews/orchestrator_latest.json
+    이 비어있음 (P0-R 1 stale 방지 가드 검증). verifier_functional 이 declare_done
+    을 내서 verifier_human 우회 후 orchestrator 가 disagree → verifier_human 으로
+    되돌리는 흐름.
+    """
+    target = sandbox / "orch-disagree-to-handoff"
+    _init_project(target, workflow_override={"human_review_mode": "handoff"})
+
+    plan = [
+        {
+            "functional": 0.7,
+            "human": 0.7,
+            "result": "pass",
+            "utterances": {
+                # verifier_functional 에서 declare_done → handoff 모드에서 verifier_human 우회.
+                "verifier_functional": {
+                    "declare_done": True,
+                    "next_speaker": "orchestrator",
+                },
+            },
+        }
+    ]
+    role_adapters: dict[str, ScriptedAdapter] = {
+        "planner": ScriptedAdapter("planner", plan),
+        "builder": ScriptedAdapter("builder", plan),
+        "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+        "verifier_human": ScriptedAdapter("verifier_human", plan),
+        "orchestrator": StatefulOrchestratorAdapter(
+            [
+                {
+                    "arbitration": "disagree",
+                    "next_speaker": "verifier_human",
+                    "decision": "needs_iteration",
+                    "next_state": "iterating",
+                    "reason": "사람 검수 필요",
+                },
+            ]
+        ),
+    }
+    _install_role_adapters(role_adapters)
+
+    rc = _run_cycle(target)
+    if rc != 0:
+        return ScenarioResult(
+            "orchestrator_disagree_routes_to_handoff",
+            False,
+            f"expected rc=0 (handoff pause), got rc={rc}",
+        )
+    session = _read_session(target)
+    if session.get("state") != "handoff_active":
+        return ScenarioResult(
+            "orchestrator_disagree_routes_to_handoff",
+            False,
+            f"state={session.get('state')} != handoff_active",
+        )
+    if session.get("last_decision") != "handoff_requested":
+        return ScenarioResult(
+            "orchestrator_disagree_routes_to_handoff",
+            False,
+            f"last_decision={session.get('last_decision')} != handoff_requested",
+        )
+    # P0-R 1 stale 방지 가드 검증: disagree 발화의 reviews 가 비워져야 함.
+    reviews_path = target / ".orch" / "runtime" / "reviews" / "orchestrator_latest.json"
+    if reviews_path.exists():
+        body = json.loads(reviews_path.read_text(encoding="utf-8"))
+        if body:
+            return ScenarioResult(
+                "orchestrator_disagree_routes_to_handoff",
+                False,
+                f"reviews/orchestrator_latest.json should be empty after disagree, got keys={list(body.keys())}",
+            )
+    if not (target / ".orch" / "handoff" / "request.yaml").exists():
+        return ScenarioResult(
+            "orchestrator_disagree_routes_to_handoff",
+            False,
+            "handoff request.yaml not created",
+        )
+    return ScenarioResult(
+        "orchestrator_disagree_routes_to_handoff",
+        True,
+        "disagree → verifier_human (handoff 모드) → 일시정지 + reviews stale 가드 검증",
+    )
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -1017,6 +1193,8 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "declare_done_forces_orchestrator": _scenario_declare_done_forces_orchestrator,
     "max_utterances_blocks_session": _scenario_max_utterances_blocks_session,
     "orchestrator_disagree_resumes_cycle": _scenario_orchestrator_disagree_resumes_cycle,
+    "orchestrator_disagree_to_end_blocks_cycle": _scenario_orchestrator_disagree_to_end_blocks_cycle,
+    "orchestrator_disagree_routes_to_handoff": _scenario_orchestrator_disagree_routes_to_handoff,
 }
 
 

@@ -564,6 +564,42 @@ def run_cycle(args: argparse.Namespace) -> int:
             arbitration_value = (utt or {}).get("arbitration")
             if arbitration_value != "disagree":
                 break
+            # disagree 검증: next_speaker 가 __end__ 이면 모순 입력 (재개해야 하는데 끝낸다고 하는 셈).
+            # AdapterExecutionError 는 try 블록 밖에서 던지면 dispatch loop 가 안 잡으므로
+            # max_utterances_blocks_session 패턴과 동일하게 BLOCKED state 직접 기록 후 rc=2.
+            disagree_next = str((utt or {}).get("next_speaker") or "")
+            if disagree_next == "__end__":
+                runtime.write_json(
+                    "runtime/session.json",
+                    {
+                        **runtime.read_json("runtime/session.json", {}),
+                        "state": EngineState.BLOCKED.value,
+                        "active_role": None,
+                        "cycle": cycle_index,
+                        "last_decision": "orchestrator_disagree_invalid_next",
+                        "last_decision_reason": (
+                            "orchestrator arbitration=disagree 인데 next_speaker=__end__ "
+                            "(모순 입력). disagree 는 같은 cycle 안에서 재개해야 하므로 "
+                            "next_speaker 는 실제 발언자 id 여야 합니다."
+                        ),
+                    },
+                )
+                runtime.append_event(
+                    "orchestrator_disagree_invalid_next",
+                    {"cycle": cycle_index, "next_speaker": "__end__"},
+                )
+                print(
+                    f"사이클 {cycle_index} 중단: orchestrator disagree 인데 "
+                    f"next_speaker=__end__ (모순 입력)."
+                )
+                return 2
+            # disagree 발화의 reviews/orchestrator_latest.json 잔류를 차단.
+            # _run_orchestrator 가 매 호출마다 reviews 를 덮어쓰기 때문에, 같은 cycle
+            # 안에서 재개되는 disagree decision 이 다음 cycle planner context 로 새지
+            # 않게 즉시 비운다. 2차 호출 (agree/needs_iteration/blocked) 가 정상 도달
+            # 하면 다시 채워지고, 도달 못 하고 BLOCKED 로 끝나도 stale 데이터는 없음.
+            # disagree reason 자체는 timeline 으로 다음 발언자에게 흐른다.
+            runtime.write_json("reviews/orchestrator_latest.json", {})
             # disagree → Rule #2 가 next_speaker 처리해서 같은 cycle 안에서 재개.
 
         # Routing rule #2: follow utterance.next_speaker; else legacy chain.
