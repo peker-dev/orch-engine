@@ -605,6 +605,33 @@ def run_cycle(args: argparse.Namespace) -> int:
             # AdapterExecutionError 는 try 블록 밖에서 던지면 dispatch loop 가 안 잡으므로
             # max_utterances_blocks_session 패턴과 동일하게 BLOCKED state 직접 기록 후 rc=2.
             disagree_next = str((utt or {}).get("next_speaker") or "")
+            # disagree 인데 next_speaker 빈값 — 명시적 모순 메시지로 처리 (그대로 두면
+            # Rule #2 가 legacy chain 종점 에러를 던져 디버깅이 느림).
+            if not disagree_next:
+                runtime.write_json(
+                    "runtime/session.json",
+                    {
+                        **runtime.read_json("runtime/session.json", {}),
+                        "state": EngineState.BLOCKED.value,
+                        "active_role": None,
+                        "cycle": cycle_index,
+                        "last_decision": "orchestrator_disagree_invalid_next",
+                        "last_decision_reason": (
+                            "orchestrator arbitration=disagree 인데 next_speaker 가 "
+                            "비어있습니다. disagree 는 같은 cycle 안에서 재개해야 하므로 "
+                            "next_speaker 에 실제 발언자 id 가 있어야 합니다."
+                        ),
+                    },
+                )
+                runtime.append_event(
+                    "orchestrator_disagree_invalid_next",
+                    {"cycle": cycle_index, "next_speaker": ""},
+                )
+                print(
+                    f"사이클 {cycle_index} 중단: orchestrator disagree 인데 "
+                    f"next_speaker 가 비어있습니다."
+                )
+                return 2
             if disagree_next == "__end__":
                 runtime.write_json(
                     "runtime/session.json",

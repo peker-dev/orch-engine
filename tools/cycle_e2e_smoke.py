@@ -21,6 +21,7 @@ Scenarios (post Phase 2 P1-5):
     - orchestrator_disagree_to_end_blocks_cycle : disagree + __end__ 모순 입력 가드
     - orchestrator_disagree_routes_to_handoff : disagree → verifier_human (handoff) → pause
     - consecutive_disagrees_warns_but_continues : D10 P0-R 3 — N회 연속 disagree 경고
+    - orchestrator_disagree_empty_next_blocks_cycle : disagree + next_speaker 빈값 가드
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -1323,6 +1324,70 @@ def _scenario_consecutive_disagrees_warns_but_continues(sandbox: Path) -> Scenar
     )
 
 
+def _scenario_orchestrator_disagree_empty_next_blocks_cycle(sandbox: Path) -> ScenarioResult:
+    """모순 입력 가드 (P0-R 1 후속): orchestrator arbitration=disagree 인데
+    next_speaker 가 빈값이면 명시적 BLOCKED. 그대로 두면 Rule #2 의 legacy chain
+    종점 에러가 던져져서 디버깅이 느림.
+    """
+    target = sandbox / "orch-disagree-empty-next"
+    _init_project(target)
+
+    plan = [
+        {
+            "functional": 0.7,
+            "human": 0.7,
+            "result": "pass",
+            "utterances": {
+                "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+            },
+        }
+    ]
+    role_adapters: dict[str, ScriptedAdapter] = {
+        "planner": ScriptedAdapter("planner", plan),
+        "builder": ScriptedAdapter("builder", plan),
+        "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+        "verifier_human": ScriptedAdapter("verifier_human", plan),
+        "orchestrator": StatefulOrchestratorAdapter(
+            [
+                {
+                    "arbitration": "disagree",
+                    "next_speaker": "",  # 빈값 — 모순 입력
+                    "decision": "needs_iteration",
+                    "next_state": "iterating",
+                    "reason": "disagree but next_speaker missing",
+                },
+            ]
+        ),
+    }
+    _install_role_adapters(role_adapters)
+
+    rc = _run_cycle(target)
+    if rc != 2:
+        return ScenarioResult(
+            "orchestrator_disagree_empty_next_blocks_cycle",
+            False,
+            f"expected rc=2 (BLOCKED), got rc={rc}",
+        )
+    session = _read_session(target)
+    if session.get("state") != "blocked":
+        return ScenarioResult(
+            "orchestrator_disagree_empty_next_blocks_cycle",
+            False,
+            f"state={session.get('state')} != blocked",
+        )
+    if session.get("last_decision") != "orchestrator_disagree_invalid_next":
+        return ScenarioResult(
+            "orchestrator_disagree_empty_next_blocks_cycle",
+            False,
+            f"last_decision={session.get('last_decision')} != orchestrator_disagree_invalid_next",
+        )
+    return ScenarioResult(
+        "orchestrator_disagree_empty_next_blocks_cycle",
+        True,
+        "disagree + next_speaker 빈값 모순 입력이 명시 BLOCKED 처리됨",
+    )
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -1336,6 +1401,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "orchestrator_disagree_to_end_blocks_cycle": _scenario_orchestrator_disagree_to_end_blocks_cycle,
     "orchestrator_disagree_routes_to_handoff": _scenario_orchestrator_disagree_routes_to_handoff,
     "consecutive_disagrees_warns_but_continues": _scenario_consecutive_disagrees_warns_but_continues,
+    "orchestrator_disagree_empty_next_blocks_cycle": _scenario_orchestrator_disagree_empty_next_blocks_cycle,
 }
 
 
