@@ -342,13 +342,25 @@ def run_cycle(args: argparse.Namespace) -> int:
     # max_utterances_per_cycle: pathological loop 차단용 큰 hard cap (기본 100).
     # max_consecutive_disagrees: orchestrator 가 같은 cycle 안에서 연속 disagree
     # 횟수 초과 시 경고 (기본 7). 엔진은 중단하지 않음 (사용자 stop 이 최종).
+    # fallback 은 명시적 None 체크 — `or` 패턴은 사용자가 0 을 명시했을 때
+    # falsy 평가로 fallback 으로 빠져 의도가 무시됨. 음수는 max(1, ...) 로 방어.
+    # counter 는 run_cycle 지역 변수라 **cycle 범위** — cycle 끝나면 자동 0 리셋.
+    # D10 본의 ("같은 단계 반복") 를 cycle 안에서 해석. session 전체에서 누적
+    # disagree 패턴은 별도 phase (사용자 stop 훅 + multi-cycle 분석).
     cycle_safety_cfg = limits_config.get("cycle_safety") or {}
-    max_utterances = int(
-        cycle_safety_cfg.get("max_utterances_per_cycle") or _MAX_UTTERANCES_PER_CYCLE
+    raw_max_utterances = cycle_safety_cfg.get("max_utterances_per_cycle")
+    max_utterances = max(
+        1,
+        int(raw_max_utterances)
+        if raw_max_utterances is not None
+        else _MAX_UTTERANCES_PER_CYCLE,
     )
-    max_consecutive_disagrees = int(
-        cycle_safety_cfg.get("max_consecutive_disagrees")
-        or _DEFAULT_MAX_CONSECUTIVE_DISAGREES
+    raw_max_disagrees = cycle_safety_cfg.get("max_consecutive_disagrees")
+    max_consecutive_disagrees = max(
+        1,
+        int(raw_max_disagrees)
+        if raw_max_disagrees is not None
+        else _DEFAULT_MAX_CONSECUTIVE_DISAGREES,
     )
     consecutive_disagrees = 0
     disagree_warning_emitted = False

@@ -803,9 +803,18 @@ def _scenario_max_utterances_blocks_session(sandbox: Path) -> ScenarioResult:
     last_decision='cycle_max_utterances_exceeded'.
     """
     target = sandbox / "max-utterances"
+    # cycle_safety 는 _init_project 의 shallow update 로 통째 교체되므로
+    # 두 키 모두 명시 (그렇지 않으면 max_consecutive_disagrees 가 누락돼 fallback 7).
+    # 이 시나리오는 ping-pong 만이라 disagree 가 발생하지 않아 동작에는 무관하지만,
+    # 향후 시나리오 확장 시 의도치 않은 fallback 을 막기 위한 안전 패턴.
     _init_project(
         target,
-        limits_override={"cycle_safety": {"max_utterances_per_cycle": 12}},
+        limits_override={
+            "cycle_safety": {
+                "max_utterances_per_cycle": 12,
+                "max_consecutive_disagrees": 7,
+            }
+        },
     )
     _install_scripted_adapters(
         [
