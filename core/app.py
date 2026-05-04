@@ -553,11 +553,18 @@ def run_cycle(args: argparse.Namespace) -> int:
             speaker = "orchestrator"
             continue
 
-        # orchestrator 가 한 번이라도 decision 을 냈다면 이 cycle 은 종료.
-        # (Phase 2 완전판에서는 arbitration=disagree 시 재개도 가능하지만, 본 단계는
-        #  "orchestrator 결정 = cycle 종료" 를 유지해 finalize/state 전환을 단순화.)
+        # Routing rule #3 (D5 P0-R 1, 2026-05-04): orchestrator 발화 후 cycle 종료 여부.
+        # - arbitration="disagree" → 같은 cycle 안에서 next_speaker 따라 재개
+        #                            (자율 피드백 루프). 다시 declare_done 이 나오면
+        #                            orchestrator 가 재호출되어 재중재. agree 까지
+        #                            도달 못 하면 _MAX_UTTERANCES_PER_CYCLE 초과로 BLOCKED.
+        # - 그 외 (arbitration="agree", None, utterance 없음) → cycle 종료, 마지막 decision
+        #   으로 finalize. utterance 미제공은 legacy adapter / 단순 시나리오 후방 호환용.
         if speaker == "orchestrator":
-            break
+            arbitration_value = (utt or {}).get("arbitration")
+            if arbitration_value != "disagree":
+                break
+            # disagree → Rule #2 가 next_speaker 처리해서 같은 cycle 안에서 재개.
 
         # Routing rule #2: follow utterance.next_speaker; else legacy chain.
         next_sp: str | None = None

@@ -14,6 +14,10 @@ Scenarios (post Phase 2 P1-5):
     - handoff_mode_pauses_cycle             : workflow.human_review_mode=handoff
     - handoff_feedback_reaches_planner      : prior handoff findings reach planner
     - terminal_handoff_clears_feedback      : approved handoff clears stale feedback
+    - utterance_next_speaker_skips_legacy_chain : D5 rule #2
+    - declare_done_forces_orchestrator      : D5 rule #1
+    - max_utterances_blocks_session         : safety cap → blocked
+    - orchestrator_disagree_resumes_cycle   : D5 P0-R 1 — disagree → next_speaker → agree
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -835,6 +839,174 @@ def _scenario_max_utterances_blocks_session(sandbox: Path) -> ScenarioResult:
     )
 
 
+class StatefulOrchestratorAdapter(ScriptedAdapter):
+    """orchestrator 가 같은 cycle 안에서 호출될 때마다 다른 결정·arbitration 을 반환.
+
+    P0-R 1 (D5: arbitration=disagree → next_speaker 지명으로 cycle 재개) 검증용.
+    1차 호출에서 disagree, 2차 호출에서 agree 같은 흐름을 시나리오에 주입할 수 있다.
+    """
+
+    def __init__(self, decisions: list[dict[str, Any]]):
+        super().__init__("orchestrator", [])
+        self._decisions = decisions
+        self._call_idx = 0
+
+    def invoke(self, invocation: Invocation) -> InvocationResult:
+        self.invocations.append(invocation)
+        idx = min(self._call_idx, len(self._decisions) - 1)
+        entry = self._decisions[idx]
+        self._call_idx += 1
+        utt_meta = {
+            "speaker": "orchestrator",
+            "next_speaker": entry.get("next_speaker", "__end__"),
+            "declare_done": False,
+            "arbitration": entry.get("arbitration"),
+        }
+        return InvocationResult(
+            status="ok",
+            summary="stateful orchestrator",
+            payload={
+                "summary": "stateful orchestrator",
+                "decision": entry.get("decision", "complete_cycle"),
+                "next_state": entry.get("next_state", "completed"),
+                "reason": entry.get("reason", "scripted stateful"),
+                "unresolved_items": [],
+                "recommended_next_action": "",
+            },
+            utterance=utt_meta,
+        )
+
+
+def _scenario_orchestrator_disagree_resumes_cycle(sandbox: Path) -> ScenarioResult:
+    """Phase 2 D5 (P0-R 1): orchestrator arbitration=disagree 시 같은 cycle 안에서
+    next_speaker 따라 재개. 두 번째 orchestrator 호출에서 agree 받으면 cycle 종료.
+
+    흐름: planner → builder → verifier_functional → verifier_human(declare_done)
+        → orchestrator [1차, disagree, next_speaker=builder]
+        → builder → verifier_functional → verifier_human(declare_done)
+        → orchestrator [2차, agree, next_speaker=__end__] → END.
+
+    검증: 한 cycle 안에서 orchestrator 2회·builder 2회 호출되고, 최종 state=completed,
+    score_history 길이 1 (재개 흐름이 새 cycle 을 열지 않았다).
+    """
+    target = sandbox / "orch-disagree-resume"
+    _init_project(target)
+
+    plan = [
+        {
+            "functional": 0.7,
+            "human": 0.7,
+            "result": "pass",
+            "utterances": {
+                # verifier_human 발화에서 declare_done → orchestrator 강제 호출.
+                # 두 번 호출되더라도 동일 utterance 가 적용되므로 매번 declare_done.
+                "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+            },
+        }
+    ]
+    role_adapters: dict[str, ScriptedAdapter] = {
+        "planner": ScriptedAdapter("planner", plan),
+        "builder": ScriptedAdapter("builder", plan),
+        "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+        "verifier_human": ScriptedAdapter("verifier_human", plan),
+        "orchestrator": StatefulOrchestratorAdapter(
+            [
+                {
+                    "arbitration": "disagree",
+                    "next_speaker": "builder",
+                    "decision": "needs_iteration",
+                    "next_state": "iterating",
+                    "reason": "보강 필요 (disagree)",
+                },
+                {
+                    "arbitration": "agree",
+                    "next_speaker": "__end__",
+                    "decision": "complete_cycle",
+                    "next_state": "completed",
+                    "reason": "수렴 (agree)",
+                },
+            ]
+        ),
+    }
+
+    def fake_build_adapter(_name: str, *, role_adapters=role_adapters):
+        import inspect
+
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back  # type: ignore[union-attr]
+            if caller is not None:
+                fn_name = caller.f_code.co_name
+                role_map = {
+                    "_run_planner": "planner",
+                    "_run_builder": "builder",
+                    "_run_orchestrator": "orchestrator",
+                }
+                if fn_name in role_map:
+                    return role_adapters[role_map[fn_name]]
+                if fn_name == "_run_verifier":
+                    role_arg = caller.f_locals.get("role")
+                    if role_arg in role_adapters:
+                        return role_adapters[role_arg]
+        finally:
+            del frame
+        raise RuntimeError("StatefulOrchestrator scenario could not resolve target role")
+
+    app._build_adapter = fake_build_adapter  # type: ignore[assignment]
+
+    rc = _run_cycle(target)
+    if rc != 0:
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle", False, f"run_cycle rc={rc}"
+        )
+
+    orch_calls = len(role_adapters["orchestrator"].invocations)
+    if orch_calls != 2:
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"orchestrator invoked {orch_calls} times, expected 2 (disagree → resume → agree)",
+        )
+    builder_calls = len(role_adapters["builder"].invocations)
+    if builder_calls != 2:
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"builder invoked {builder_calls} times, expected 2 (initial + resume after disagree)",
+        )
+    session = _read_session(target)
+    if session.get("state") != "completed":
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"state={session.get('state')} != completed",
+        )
+    if session.get("last_decision") != "complete_cycle":
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"last_decision={session.get('last_decision')} != complete_cycle",
+        )
+    history = session.get("score_history", [])
+    if len(history) != 1:
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"score_history len={len(history)}, expected 1 (resume must stay inside one cycle)",
+        )
+    if history[0].get("decision") != "complete_cycle":
+        return ScenarioResult(
+            "orchestrator_disagree_resumes_cycle",
+            False,
+            f"history[0].decision={history[0].get('decision')} != complete_cycle",
+        )
+    return ScenarioResult(
+        "orchestrator_disagree_resumes_cycle",
+        True,
+        "disagree → next_speaker=builder → declare_done → agree, 한 cycle 안에서 closure",
+    )
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -844,6 +1016,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "utterance_next_speaker_skips_legacy_chain": _scenario_utterance_next_speaker_skips_legacy_chain,
     "declare_done_forces_orchestrator": _scenario_declare_done_forces_orchestrator,
     "max_utterances_blocks_session": _scenario_max_utterances_blocks_session,
+    "orchestrator_disagree_resumes_cycle": _scenario_orchestrator_disagree_resumes_cycle,
 }
 
 
