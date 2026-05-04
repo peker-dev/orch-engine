@@ -20,6 +20,7 @@ Scenarios (post Phase 2 P1-5):
     - orchestrator_disagree_resumes_cycle   : D5 P0-R 1 — disagree → next_speaker → agree
     - orchestrator_disagree_to_end_blocks_cycle : disagree + __end__ 모순 입력 가드
     - orchestrator_disagree_routes_to_handoff : disagree → verifier_human (handoff) → pause
+    - consecutive_disagrees_warns_but_continues : D10 P0-R 3 — N회 연속 disagree 경고
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -789,18 +790,23 @@ def _scenario_declare_done_forces_orchestrator(sandbox: Path) -> ScenarioResult:
 
 
 def _scenario_max_utterances_blocks_session(sandbox: Path) -> ScenarioResult:
-    """Safety net: if the free-utterance loop exceeds _MAX_UTTERANCES_PER_CYCLE
-    without reaching the orchestrator, the engine must leave the session in a
-    RESUMABLE state (blocked), not mid-flight (planning/building). Otherwise
-    the next run-cycle would be rejected by RESUMABLE_STATES and the project
-    would deadlock.
+    """Safety net: if the free-utterance loop exceeds the configured
+    `cycle_safety.max_utterances_per_cycle` without reaching an orchestrator
+    decision, the engine must leave the session in a RESUMABLE state
+    (blocked), not mid-flight (planning/building). Otherwise the next
+    run-cycle would be rejected by RESUMABLE_STATES and the project would
+    deadlock.
 
     Setup: planner and builder ping-pong forever via utterance.next_speaker.
-    The loop cap (12) should fire and session.state should end up 'blocked'
-    with last_decision='cycle_max_utterances_exceeded'.
+    Limits override sets max_utterances_per_cycle=12 so the cap fires fast
+    (production default is 100). Session.state should end up 'blocked' with
+    last_decision='cycle_max_utterances_exceeded'.
     """
     target = sandbox / "max-utterances"
-    _init_project(target)
+    _init_project(
+        target,
+        limits_override={"cycle_safety": {"max_utterances_per_cycle": 12}},
+    )
     _install_scripted_adapters(
         [
             {
@@ -1183,6 +1189,131 @@ def _scenario_orchestrator_disagree_routes_to_handoff(sandbox: Path) -> Scenario
     )
 
 
+def _scenario_consecutive_disagrees_warns_but_continues(sandbox: Path) -> ScenarioResult:
+    """P0-R 3 (D10): orchestrator 가 같은 cycle 안에서 max_consecutive_disagrees
+    회 연속 disagree 면 stdout + events.jsonl 에 경고 1회. 엔진은 중단하지 않고
+    계속 진행하다가 결국 agree 로 closure. 사용자 stop 이 최종 방어선.
+
+    Setup: max_consecutive_disagrees=3, max_utterances_per_cycle=50 으로 override.
+    StatefulOrchestratorAdapter 가 disagree 4회 후 agree 1회 시퀀스 반환. 흐름:
+    planner → builder → vf → vh(done) → orch[1차 disagree] → builder → vf →
+    vh(done) → orch[2차 disagree] → ... → orch[5차 agree] → END.
+    """
+    target = sandbox / "consecutive-disagrees"
+    _init_project(
+        target,
+        limits_override={
+            "cycle_safety": {
+                "max_utterances_per_cycle": 50,
+                "max_consecutive_disagrees": 3,
+            }
+        },
+    )
+
+    plan = [
+        {
+            "functional": 0.7,
+            "human": 0.7,
+            "result": "pass",
+            "utterances": {
+                "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+            },
+        }
+    ]
+    role_adapters: dict[str, ScriptedAdapter] = {
+        "planner": ScriptedAdapter("planner", plan),
+        "builder": ScriptedAdapter("builder", plan),
+        "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+        "verifier_human": ScriptedAdapter("verifier_human", plan),
+        "orchestrator": StatefulOrchestratorAdapter(
+            [
+                {
+                    "arbitration": "disagree",
+                    "next_speaker": "builder",
+                    "decision": "needs_iteration",
+                    "next_state": "iterating",
+                    "reason": f"disagree #{i + 1}",
+                }
+                for i in range(4)
+            ]
+            + [
+                {
+                    "arbitration": "agree",
+                    "next_speaker": "__end__",
+                    "decision": "complete_cycle",
+                    "next_state": "completed",
+                    "reason": "마침내 수렴",
+                }
+            ]
+        ),
+    }
+    _install_role_adapters(role_adapters)
+
+    rc = _run_cycle(target)
+    if rc != 0:
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"expected rc=0 (eventual agree), got rc={rc}",
+        )
+    session = _read_session(target)
+    if session.get("state") != "completed":
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"state={session.get('state')} != completed (engine should NOT block on disagree warnings)",
+        )
+
+    orch_calls = len(role_adapters["orchestrator"].invocations)
+    if orch_calls != 5:
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"orchestrator invoked {orch_calls} times, expected 5 (4 disagree + 1 agree)",
+        )
+
+    # events.jsonl 에 consecutive_disagrees_warning 이 정확히 1회 (한 cycle 안에서 한 번만 emit).
+    events_path = target / ".orch" / "runtime" / "events.jsonl"
+    if not events_path.exists():
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            "events.jsonl not created",
+        )
+    warning_lines = []
+    for raw in events_path.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        evt = json.loads(raw)
+        if evt.get("event") == "consecutive_disagrees_warning":
+            warning_lines.append(evt)
+    if len(warning_lines) != 1:
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"consecutive_disagrees_warning emitted {len(warning_lines)} times, expected 1",
+        )
+    warn = warning_lines[0]
+    if warn.get("threshold") != 3:
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"warning threshold={warn.get('threshold')} != 3",
+        )
+    if warn.get("consecutive_disagrees") != 3:
+        return ScenarioResult(
+            "consecutive_disagrees_warns_but_continues",
+            False,
+            f"warning fired at consecutive_disagrees={warn.get('consecutive_disagrees')} != 3",
+        )
+
+    return ScenarioResult(
+        "consecutive_disagrees_warns_but_continues",
+        True,
+        "disagree 4회 연속에 임계(3) 도달 경고 1회, agree 까지 계속 진행해서 cycle closure",
+    )
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -1195,6 +1326,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "orchestrator_disagree_resumes_cycle": _scenario_orchestrator_disagree_resumes_cycle,
     "orchestrator_disagree_to_end_blocks_cycle": _scenario_orchestrator_disagree_to_end_blocks_cycle,
     "orchestrator_disagree_routes_to_handoff": _scenario_orchestrator_disagree_routes_to_handoff,
+    "consecutive_disagrees_warns_but_continues": _scenario_consecutive_disagrees_warns_but_continues,
 }
 
 

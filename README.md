@@ -114,7 +114,8 @@ verifier_human 이 handoff 모드면:
 
 - `RESUMABLE_STATES = {idle, iterating, completed}`: 이 상태에서만 새 사이클 진입 허용
 - 사이클 종료 판정은 orchestrator LLM 단일 책임 (Phase 2 P1-5-A 부터 규칙 기반 `max_cycles` / `stop_on_stagnation` escalation 제거)
-- 한 사이클 안의 최대 발화 수 `_MAX_UTTERANCES_PER_CYCLE = 12` (무한 루프 방지용 안전망)
+- 한 사이클 안의 최대 발화 수 `cycle_safety.max_utterances_per_cycle` (기본 100, pathological loop 차단용 큰 안전선; 이전 12 hard cap 은 D5 disagree 재개 흐름을 일찍 끊는 문제로 P0-R 3 에서 100 으로 완화)
+- D10 disagree 경고 `cycle_safety.max_consecutive_disagrees` (기본 7): orchestrator 가 같은 cycle 안에서 N회 연속 disagree 시 stdout + `events.jsonl` 에 1회 경고. 엔진은 중단하지 않고 max_utterances 까지 계속 진행 (사용자 stop 이 최종 방어선).
 - `handoff_pause_count`: 세션이 handoff 로 일시정지한 횟수 (세션 텔레메트리용 누적 메트릭)
 - handoff 응답의 `findings` / `recommended_next_action`은 다음 iterating 사이클의 planner context에 자동 주입
 

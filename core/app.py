@@ -47,10 +47,18 @@ _LEGACY_SPEAKER_CHAIN = {
     "verifier_human": "orchestrator",
 }
 
-# Safety cap on utterances per cycle. With the legacy chain a cycle uses
-# 5 utterances; `declare_done` re-routing can add a couple more. 12 leaves
-# headroom while still breaking out of pathological loops.
-_MAX_UTTERANCES_PER_CYCLE = 12
+# Safety cap on utterances per cycle. P0-R 3 (D10): 자율 피드백 루프가 한 cycle
+# 안에서 disagree → 재개 흐름을 자연스럽게 돌 수 있게 큰 안전선으로 둠. 진짜
+# pathological loop 만 차단하는 역할. limits.yaml.cycle_safety.max_utterances_per_cycle
+# 로 override 가능. (이전 값 12 는 자유 발화 dispatch 가 disagree 재개 도입 후
+# 한 cycle 당 9~15 발화를 자연스럽게 도달해 작업을 일찍 끊는 문제가 있었음.)
+_MAX_UTTERANCES_PER_CYCLE = 100
+
+# D10 disagree 무한 반복 안전선. orchestrator 가 같은 cycle 안에서 N회 연속
+# arbitration=disagree 를 내면 stdout + runtime event 로 경고. 엔진은 중단하지
+# 않음 (사용자 stop 이 최종 방어선). limits.yaml.cycle_safety.max_consecutive_disagrees
+# 로 override 가능.
+_DEFAULT_MAX_CONSECUTIVE_DISAGREES = 7
 
 
 def parse_args() -> argparse.Namespace:
@@ -330,11 +338,25 @@ def run_cycle(args: argparse.Namespace) -> int:
         "human_review": None,
         "decision": None,
     }
+    # D10 cycle safety — limits.yaml 의 cycle_safety 그룹에서 임계치 가져오기.
+    # max_utterances_per_cycle: pathological loop 차단용 큰 hard cap (기본 100).
+    # max_consecutive_disagrees: orchestrator 가 같은 cycle 안에서 연속 disagree
+    # 횟수 초과 시 경고 (기본 7). 엔진은 중단하지 않음 (사용자 stop 이 최종).
+    cycle_safety_cfg = limits_config.get("cycle_safety") or {}
+    max_utterances = int(
+        cycle_safety_cfg.get("max_utterances_per_cycle") or _MAX_UTTERANCES_PER_CYCLE
+    )
+    max_consecutive_disagrees = int(
+        cycle_safety_cfg.get("max_consecutive_disagrees")
+        or _DEFAULT_MAX_CONSECUTIVE_DISAGREES
+    )
+    consecutive_disagrees = 0
+    disagree_warning_emitted = False
     speaker = "planner"
     step_no = 0
     while True:
         step_no += 1
-        if step_no > _MAX_UTTERANCES_PER_CYCLE:
+        if step_no > max_utterances:
             runtime.write_json(
                 "runtime/session.json",
                 {
@@ -344,7 +366,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                     "cycle": cycle_index,
                     "last_decision": "cycle_max_utterances_exceeded",
                     "last_decision_reason": (
-                        f"최대 발화 수 {_MAX_UTTERANCES_PER_CYCLE} 초과, "
+                        f"최대 발화 수 {max_utterances} 초과, "
                         f"마지막 speaker={speaker}"
                     ),
                 },
@@ -354,7 +376,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 {"cycle": cycle_index, "last_speaker": speaker},
             )
             print(
-                f"사이클 {cycle_index} 중단: 최대 발화 수 {_MAX_UTTERANCES_PER_CYCLE} 초과 "
+                f"사이클 {cycle_index} 중단: 최대 발화 수 {max_utterances} 초과 "
                 f"(마지막 speaker={speaker}, orchestrator 결정 전 종료)."
             )
             return 2
@@ -364,7 +386,7 @@ def run_cycle(args: argparse.Namespace) -> int:
         # verifier_human 진입 시 handoff 모드면 adapter 호출 대신 pause.
         if speaker == "verifier_human" and _human_review_mode(workflow_config) == "handoff":
             step_ctx = _log_step_start(
-                cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, "verifier_human", "handoff"
+                cycle_index, step_no, max_utterances, "verifier_human", "handoff"
             )
             handoff_status = _pause_for_human_handoff(
                 target_root=target_root,
@@ -376,7 +398,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 functional_review=loop_state["functional_review"] or {},
             )
             _log_step_end(
-                cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, "verifier_human", "handoff",
+                cycle_index, step_no, max_utterances, "verifier_human", "handoff",
                 step_ctx,
                 detail=f"일시정지, handoff_id={handoff_status.handoff_id}",
             )
@@ -394,7 +416,7 @@ def run_cycle(args: argparse.Namespace) -> int:
 
         adapter_name = str(roles_config.get(speaker, "unknown"))
         step_ctx = _log_step_start(
-            cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name
+            cycle_index, step_no, max_utterances, speaker, adapter_name
         )
         utt: dict[str, object] | None = None
         try:
@@ -411,7 +433,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 )
                 loop_state["task"] = task
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                     detail=f"task={(task or {}).get('title', 'none')}",
                 )
@@ -447,7 +469,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                     existing_artifacts=existing_artifacts,
                 )
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                 )
             elif speaker == "verifier_functional":
@@ -467,7 +489,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 )
                 loop_state["functional_review"] = review
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                     detail=(
                         f"result={review.get('result')} "
@@ -491,7 +513,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 )
                 loop_state["human_review"] = review
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                     detail=(
                         f"result={review.get('result')} "
@@ -515,7 +537,7 @@ def run_cycle(args: argparse.Namespace) -> int:
                 )
                 loop_state["decision"] = decision
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                     detail=f"decision={decision.get('decision')}",
                 )
@@ -532,7 +554,7 @@ def run_cycle(args: argparse.Namespace) -> int:
             # 예외는 그 뒤에 던져지므로 여기서는 heartbeat 흔적만 남지 않게 한 번 더 호출.
             try:
                 _log_step_end(
-                    cycle_index, step_no, _MAX_UTTERANCES_PER_CYCLE, speaker, adapter_name,
+                    cycle_index, step_no, max_utterances, speaker, adapter_name,
                     step_ctx,
                     detail=f"실패: {type(exc).__name__}",
                 )
@@ -557,12 +579,15 @@ def run_cycle(args: argparse.Namespace) -> int:
         # - arbitration="disagree" → 같은 cycle 안에서 next_speaker 따라 재개
         #                            (자율 피드백 루프). 다시 declare_done 이 나오면
         #                            orchestrator 가 재호출되어 재중재. agree 까지
-        #                            도달 못 하면 _MAX_UTTERANCES_PER_CYCLE 초과로 BLOCKED.
+        #                            도달 못 하면 max_utterances 초과로 BLOCKED.
         # - 그 외 (arbitration="agree", None, utterance 없음) → cycle 종료, 마지막 decision
         #   으로 finalize. utterance 미제공은 legacy adapter / 단순 시나리오 후방 호환용.
         if speaker == "orchestrator":
             arbitration_value = (utt or {}).get("arbitration")
             if arbitration_value != "disagree":
+                # agree / None / 기타 → cycle 종료. D10 disagree counter reset.
+                consecutive_disagrees = 0
+                disagree_warning_emitted = False
                 break
             # disagree 검증: next_speaker 가 __end__ 이면 모순 입력 (재개해야 하는데 끝낸다고 하는 셈).
             # AdapterExecutionError 는 try 블록 밖에서 던지면 dispatch loop 가 안 잡으므로
@@ -600,6 +625,32 @@ def run_cycle(args: argparse.Namespace) -> int:
             # 하면 다시 채워지고, 도달 못 하고 BLOCKED 로 끝나도 stale 데이터는 없음.
             # disagree reason 자체는 timeline 으로 다음 발언자에게 흐른다.
             runtime.write_json("reviews/orchestrator_latest.json", {})
+            # D10 disagree counter — 같은 cycle 안에서 disagree 가 연속 N회 발생하면
+            # 1회만 경고. 엔진은 중단하지 않음 (사용자 stop 이 최종 방어선). 사용자가
+            # 메시지를 보고 수동으로 끊거나 그대로 두고 max_utterances 까지 흐름 지켜봄.
+            consecutive_disagrees += 1
+            if (
+                consecutive_disagrees >= max_consecutive_disagrees
+                and not disagree_warning_emitted
+            ):
+                disagree_warning_emitted = True
+                print(
+                    f"⚠️  사이클 {cycle_index}: orchestrator disagree 가 "
+                    f"{consecutive_disagrees}회 연속 발생 (임계 "
+                    f"{max_consecutive_disagrees}). 자율 피드백 루프가 수렴하지 "
+                    f"못하는 신호일 수 있습니다. 중단하시려면 사용자 stop 으로 "
+                    f"끊어주세요 — 엔진은 max_utterances={max_utterances} 까지 "
+                    f"계속 진행합니다.",
+                    flush=True,
+                )
+                runtime.append_event(
+                    "consecutive_disagrees_warning",
+                    {
+                        "cycle": cycle_index,
+                        "consecutive_disagrees": consecutive_disagrees,
+                        "threshold": max_consecutive_disagrees,
+                    },
+                )
             # disagree → Rule #2 가 next_speaker 처리해서 같은 cycle 안에서 재개.
 
         # Routing rule #2: follow utterance.next_speaker; else legacy chain.
