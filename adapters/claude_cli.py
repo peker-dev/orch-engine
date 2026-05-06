@@ -12,10 +12,12 @@
 """
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Any
 
 from .contracts import response_schema, system_prompt, user_prompt
@@ -39,6 +41,10 @@ class ClaudeCliAdapter:
         self.executable = resolved
         self.model = model
         self.timeout = timeout
+        # 글로벌/프로젝트 CLAUDE.md 자동 발견을 막기 위해 빈 임시 폴더에서 호출.
+        # 실측: 호출당 21,938 → 1,921 토큰 (1/10), $0.15 → $0.05.
+        self._cwd = tempfile.mkdtemp(prefix="orch-claude-")
+        atexit.register(shutil.rmtree, self._cwd, ignore_errors=True)
 
     def invoke(self, role: str, context: dict[str, Any]) -> dict[str, Any]:
         schema = response_schema(role)
@@ -58,7 +64,12 @@ class ClaudeCliAdapter:
         cmd.append(user_prompt(role, context))
 
         completed = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=self.timeout, encoding="utf-8"
+            cmd,
+            cwd=self._cwd,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            encoding="utf-8",
         )
         if completed.returncode != 0:
             raise RuntimeError(

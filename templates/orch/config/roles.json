@@ -6,5 +6,6 @@
     "builder": "scripted",
     "verifier": "scripted",
     "orchestrator": "scripted"
-  }
+  },
+  "models": {}
 }

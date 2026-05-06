@@ -58,7 +58,7 @@ PROFILES: dict[str, dict[str, str]] = {
 }
 
 
-def _make_adapter(name: str) -> Adapter:
+def _make_adapter(name: str, model: str | None = None) -> Adapter:
     if name == "scripted":
         from adapters.scripted import ScriptedAdapter
 
@@ -66,25 +66,28 @@ def _make_adapter(name: str) -> Adapter:
     if name == "claude_cli":
         from adapters.claude_cli import ClaudeCliAdapter
 
-        return ClaudeCliAdapter()
+        return ClaudeCliAdapter(model=model)
     if name == "codex_cli":
         from adapters.codex_cli import CodexCliAdapter
 
-        return CodexCliAdapter()
+        return CodexCliAdapter(model=model)
     raise SystemExit(f"unknown adapter: {name!r}")
 
 
 def _build_adapters(target: Path) -> dict[str, Adapter]:
     roles = store.load_json(store.paths(target)["roles"])
     mapping: dict[str, str] = roles.get("adapters", {})
+    models: dict[str, str] = roles.get("models", {})
     if not mapping:
         raise SystemExit(".orch/config/roles.json has no 'adapters' mapping")
-    cache: dict[str, Adapter] = {}
+    cache: dict[tuple[str, str | None], Adapter] = {}
     out: dict[str, Adapter] = {}
     for role, name in mapping.items():
-        if name not in cache:
-            cache[name] = _make_adapter(name)
-        out[role] = cache[name]
+        model = models.get(role)
+        key = (name, model)
+        if key not in cache:
+            cache[key] = _make_adapter(name, model)
+        out[role] = cache[key]
     return out
 
 
