@@ -81,9 +81,8 @@ class UnityBatchmodeRunner(BaseRunnerAdapter):
                 summary=f"unity_batchmode dry-run for method={method}",
                 stdout_excerpt="",
                 stderr_excerpt="",
-                artifact_paths=[str(log_path.relative_to(project_root.parent))]
-                if project_root.parent in log_path.parents
-                else [str(log_path)],
+                # artifact_paths 는 항상 절대 경로 — dry-run / live 둘 다 일관 (code-review 후속).
+                artifact_paths=[str(log_path)],
                 verdict="pass",
                 score=1.0,
                 findings=[
@@ -92,7 +91,8 @@ class UnityBatchmodeRunner(BaseRunnerAdapter):
                 duration_sec=0.0,
             )
 
-        timeout = int(cfg.get("timeout_sec") or self.default_timeout_sec)
+        # timeout 음수/0 방어 — subprocess.run 에 넘어가기 전 최소 1초 보장 (code-review 후속).
+        timeout = max(1, int(cfg.get("timeout_sec") or self.default_timeout_sec))
         started = time.monotonic()
         try:
             completed = subprocess.run(

@@ -23,16 +23,22 @@ from dataclasses import dataclass
 
 
 _COMPILE_ERROR_RE = re.compile(r"\berror CS\d+:")
-_EXCEPTION_HEADER_RE = re.compile(r"^\s*(Unhandled Exception:|.*Exception:|\[Error\])", re.MULTILINE)
+# code-review 후속 (2026-05-06): `.*Exception:` 은 progress 라인 ("Loading SomeException: type")
+# 같은 무해한 텍스트도 잡았음. `^\s*(...)` 로 line 시작 강제 + match 메서드 사용.
+# `[A-Z]\w+Exception:` 은 첫 글자 대문자 + 단어 경계 보장. `re.MULTILINE` 은 line-by-line
+# scan 에서 무의미라 제거.
+_EXCEPTION_HEADER_RE = re.compile(r"^\s*(Unhandled Exception:|[A-Z]\w+Exception:|\[Error\])")
 _ABORT_PATTERNS = (
     "BatchMode: Cannot execute method",
     "project folder is read only",
     "Aborting batchmode",
     "Failed to load",
 )
+# code-review 후속: "Exiting Unity" 만 있으면 강제 종료 시에도 매칭되어 false pass
+# 위험. "Exiting batchmode successfully" 와 "Exiting Unity successfully" 만 인정.
 _SUCCESS_PATTERNS = (
     "Exiting batchmode successfully",
-    "Exiting Unity",
+    "Exiting Unity successfully",
 )
 _MAX_FINDINGS = 10
 
@@ -63,7 +69,7 @@ def parse_unity_log(text: str) -> UnityLogSummary:
         if _COMPILE_ERROR_RE.search(line):
             if len(compile_errors) < _MAX_FINDINGS:
                 compile_errors.append(line.strip())
-        if _EXCEPTION_HEADER_RE.search(line):
+        if _EXCEPTION_HEADER_RE.match(line):
             if len(exceptions) < _MAX_FINDINGS:
                 exceptions.append(line.strip())
         for marker in _ABORT_PATTERNS:
