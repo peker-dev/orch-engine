@@ -22,6 +22,7 @@ Scenarios (post Phase 2 P1-5):
     - orchestrator_disagree_routes_to_handoff : disagree → verifier_human (handoff) → pause
     - consecutive_disagrees_warns_but_continues : D10 P0-R 3 — N회 연속 disagree 경고
     - orchestrator_disagree_empty_next_blocks_cycle : disagree + next_speaker 빈값 가드
+    - custom_verifier_routing                : P0-R 2 (D9/D11) — 도메인 roles.yaml 의 custom verifier 라우팅
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -195,6 +196,24 @@ class ScriptedAdapter(BaseAdapter):
                     "reason": str(entry.get("orchestrator_reason", f"scripted: derived from result={result}")),
                     "unresolved_items": [str(item) for item in unresolved],
                     "recommended_next_action": str(entry.get("orchestrator_recommendation", "")),
+                },
+                utterance=utt_meta,
+            )
+        # P0-R 2 (D9/D11): family="verifier" custom 역할 (예: verifier_safety)
+        # 도 functional 형태로 응답한다. native verifier 가 아닌데 verifier_*
+        # prefix 인 경우만 적용 — 다른 family 가 추가될 때까지 misuse 방지.
+        if self.role.startswith("verifier_"):
+            return InvocationResult(
+                status="ok",
+                summary=f"scripted custom verifier ({self.role})",
+                payload={
+                    "summary": f"scripted custom verifier ({self.role})",
+                    "result": entry.get("result", "pass"),
+                    "score": float(entry.get("functional", 0.9)),
+                    "findings": [],
+                    "evidence": [],
+                    "blocking_issues": [],
+                    "suggested_actions": [],
                 },
                 utterance=utt_meta,
             )
@@ -1388,6 +1407,98 @@ def _scenario_orchestrator_disagree_empty_next_blocks_cycle(sandbox: Path) -> Sc
     )
 
 
+def _scenario_custom_verifier_routing(sandbox: Path) -> ScenarioResult:
+    """P0-R 2 (D9/D11) 1차 MVP: 도메인이 `domains/<id>/roles.yaml` 에 family="verifier"
+    custom 역할을 선언하면 dispatch loop 가 정상 라우팅하고 reviews/<role>_latest.json
+    이 작성된다. 엔진 코드 변경 없이 도메인 설정 파일만으로 새 검수자가 합류하는지 검증.
+    """
+    # ENGINE_ROOT/domains/<test_id>/roles.yaml 임시 fixture. 다른 시나리오가
+    # 같은 sandbox 를 공유할 수 있으므로 UUID 로 unique id 를 만들고 finally 에서 정리.
+    from adapters import base as _ab
+    from uuid import uuid4 as _uuid4
+
+    test_domain_id = f"__test_custom_role_{_uuid4().hex[:8]}__"
+    test_domain_dir = Path(_ab.ENGINE_ROOT) / "domains" / test_domain_id
+    test_domain_dir.mkdir(parents=True, exist_ok=True)
+    (test_domain_dir / "roles.yaml").write_text(
+        "roles:\n"
+        "  - id: verifier_safety\n"
+        "    family: verifier\n"
+        "    display: 안전 검수자\n"
+        "    default_provider: codex_cli\n",
+        encoding="utf-8",
+    )
+    target = sandbox / "custom-verifier"
+    try:
+        _init_project(target)
+        # session.json 의 domain 키를 임시 도메인 id 로 교체. _resolve_domain_id 가
+        # session.json -> project.yaml 순으로 보므로 session.json 만 갱신해도 충분.
+        session_path = target / ".orch" / "runtime" / "session.json"
+        session_data = json.loads(session_path.read_text(encoding="utf-8"))
+        session_data["domain"] = test_domain_id
+        session_path.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        plan = [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "planner": {"next_speaker": "builder"},
+                    "builder": {"next_speaker": "verifier_safety"},
+                    "verifier_safety": {"next_speaker": "verifier_functional"},
+                    "verifier_functional": {"next_speaker": "verifier_human"},
+                    "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+                    "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
+                },
+            }
+        ]
+        role_adapters: dict[str, ScriptedAdapter] = {
+            "planner": ScriptedAdapter("planner", plan),
+            "builder": ScriptedAdapter("builder", plan),
+            "verifier_safety": ScriptedAdapter("verifier_safety", plan),
+            "verifier_functional": ScriptedAdapter("verifier_functional", plan),
+            "verifier_human": ScriptedAdapter("verifier_human", plan),
+            "orchestrator": ScriptedAdapter("orchestrator", plan),
+        }
+        _install_role_adapters(role_adapters)
+
+        rc = _run_cycle(target)
+        if rc != 0:
+            return ScenarioResult("custom_verifier_routing", False, f"run_cycle rc={rc}")
+        if not role_adapters["verifier_safety"].invocations:
+            return ScenarioResult(
+                "custom_verifier_routing", False, "verifier_safety adapter was never invoked"
+            )
+        review_path = target / ".orch" / "reviews" / "verifier_safety_latest.json"
+        if not review_path.exists():
+            return ScenarioResult(
+                "custom_verifier_routing", False,
+                "reviews/verifier_safety_latest.json was not written",
+            )
+        review_data = json.loads(review_path.read_text(encoding="utf-8"))
+        if review_data.get("role") != "verifier_safety":
+            return ScenarioResult(
+                "custom_verifier_routing", False,
+                f"review.role={review_data.get('role')!r} != 'verifier_safety'",
+            )
+        session = _read_session(target)
+        if session.get("state") != "completed":
+            return ScenarioResult(
+                "custom_verifier_routing", False,
+                f"final state={session.get('state')!r} != 'completed'",
+            )
+        return ScenarioResult(
+            "custom_verifier_routing", True,
+            "domain roles.yaml 의 verifier_safety 가 dispatch loop 라우팅 + reviews 분리 저장 + cycle closure",
+        )
+    finally:
+        shutil.rmtree(test_domain_dir, ignore_errors=True)
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -1402,6 +1513,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "orchestrator_disagree_routes_to_handoff": _scenario_orchestrator_disagree_routes_to_handoff,
     "consecutive_disagrees_warns_but_continues": _scenario_consecutive_disagrees_warns_but_continues,
     "orchestrator_disagree_empty_next_blocks_cycle": _scenario_orchestrator_disagree_empty_next_blocks_cycle,
+    "custom_verifier_routing": _scenario_custom_verifier_routing,
 }
 
 

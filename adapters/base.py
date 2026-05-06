@@ -31,9 +31,22 @@ UTTERANCE_SCHEMA_PATH = ENGINE_ROOT / "schemas" / "utterance.v1.json"
 # reaches the LLM. Absence is silently tolerated (legacy domains and the
 # scripted-adapter test surface both run without guides).
 DOMAINS_ROOT = ENGINE_ROOT / "domains"
-_SUPPORTED_ROLES = frozenset(
+_NATIVE_ROLES = frozenset(
     {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
 )
+_SUPPORTED_ROLES = _NATIVE_ROLES  # backward-compat alias for older importers
+# D9/D11 (Phase 2 P0-R 2, 2026-05-06): 1차 MVP. 도메인이 `domains/<id>/roles.yaml`
+# 에 family="verifier" 인 custom 역할을 선언하면 엔진 코드 변경 없이 합류된다.
+# native role 은 자기 자신의 family 를 가지고, custom 역할은 roles.yaml 의
+# family 필드를 따른다. 1차 MVP 는 family="verifier" 만 지원 — 그 외 family
+# 는 상위에서 unsupported 로 거부된다.
+_NATIVE_ROLE_FAMILY = {
+    "planner": "planner",
+    "builder": "builder",
+    "verifier_functional": "verifier",
+    "verifier_human": "verifier",
+    "orchestrator": "orchestrator",
+}
 ROLE_TIMEOUTS = {
     "planner": 180,
     "builder": 600,
@@ -41,6 +54,15 @@ ROLE_TIMEOUTS = {
     "verifier_human": 240,
     "orchestrator": 120,
 }
+# Custom 역할의 family 별 default timeout (initial seconds). native role 은
+# ROLE_TIMEOUTS 룩업이 우선이며, 여기 dict 는 fallback 만 담당.
+_FAMILY_DEFAULT_TIMEOUTS = {
+    "verifier": 300,
+    "planner": 180,
+    "builder": 600,
+    "orchestrator": 120,
+}
+SUPPORTED_CUSTOM_FAMILIES = frozenset({"verifier"})
 
 
 @dataclass(slots=True)
@@ -134,10 +156,13 @@ class BaseCliAdapter(BaseAdapter):
     provider_label: str = ""
 
     def invoke(self, invocation: Invocation) -> InvocationResult:
-        if invocation.role not in _SUPPORTED_ROLES:
+        allowed_roles = resolve_role_set(invocation.working_directory)
+        if invocation.role not in allowed_roles:
             raise AdapterExecutionError(
                 f"Unsupported role for utterance.v1 invocation: {invocation.role!r}"
             )
+        role_family = resolve_role_family(invocation.working_directory, invocation.role)
+        role_timeout = _resolve_role_timeout(invocation.role, role_family)
         schema_path = UTTERANCE_SCHEMA_PATH
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         required_keys = list(schema.get("required", []))
@@ -149,6 +174,7 @@ class BaseCliAdapter(BaseAdapter):
             "request_id": request_id,
             "provider": self.provider_id,
             "role": invocation.role,
+            "role_family": role_family,
             "objective": invocation.objective,
             "working_directory": str(Path(invocation.working_directory).resolve()),
             "mode": "run-cycle",
@@ -156,7 +182,7 @@ class BaseCliAdapter(BaseAdapter):
             "input_files": [],
             "write_scope": _default_write_scope(invocation),
             "output_schema_path": str(schema_path),
-            "timeout_sec": ROLE_TIMEOUTS[invocation.role],
+            "timeout_sec": role_timeout,
         }
 
         last_error: str | None = None
@@ -182,7 +208,7 @@ class BaseCliAdapter(BaseAdapter):
                     command,
                     cwd=invocation.working_directory,
                     stdin_text=attempt_prompt if uses_stdin else None,
-                    timeout_sec=ROLE_TIMEOUTS[invocation.role],
+                    timeout_sec=role_timeout,
                 )
             except (FileNotFoundError, PermissionError) as exc:
                 last_error = f"{self.provider_label} could not start for role={invocation.role}: {exc}"
@@ -201,7 +227,7 @@ class BaseCliAdapter(BaseAdapter):
                 partial_stdout = _coerce_text(getattr(exc, "stdout", None))
                 partial_stderr = _coerce_text(getattr(exc, "stderr", None))
                 last_error = (
-                    f"{self.provider_label} timed out after {ROLE_TIMEOUTS[invocation.role]}s "
+                    f"{self.provider_label} timed out after {role_timeout}s "
                     f"for role={invocation.role}"
                 )
                 _write_text(attempt_dir / "stdout.txt", partial_stdout)
@@ -274,13 +300,14 @@ class BaseCliAdapter(BaseAdapter):
                     "declare_done": bool(raw_payload.get("declare_done") or False),
                     "arbitration": raw_payload.get("arbitration"),
                 }
-                extractor = _UTTERANCE_COERCERS.get(invocation.role)
+                extractor = _resolve_coercer(invocation.role, role_family)
                 if extractor is None:
                     raise AdapterExecutionError(
                         f"No structured-state extractor for role {invocation.role!r}"
                     )
                 payload = extractor(raw_payload)
-                payload = _normalize_role_payload(invocation.role, payload)
+                normalize_role = _resolve_normalize_role(invocation.role, role_family)
+                payload = _normalize_role_payload(normalize_role, payload)
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
                 _write_json(
@@ -339,7 +366,7 @@ def _build_run_root(working_directory: Path, request_id: str) -> Path:
 
 
 def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: list[str]) -> str:
-    role_guidance = {
+    role_guidance_map = {
         "planner": (
             "Break the objective into the smallest useful next task. "
             "If previous_reviews is provided, treat each entry as a uniform triad "
@@ -443,14 +470,29 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
             "\"reason\":\"...\",\"unresolved_items\":[],\"recommended_next_action\":\"...\"}\n"
             "    ```"
         ),
-    }[invocation.role]
-    scope_guidance = {
+    }
+    scope_guidance_map = {
         "planner": "Do not modify files.",
         "builder": "Modify only files necessary for the objective and keep the change scope tight.",
         "verifier_functional": "Avoid editing project files unless a verification step requires generated test artifacts.",
         "verifier_human": "Do not modify files during review.",
         "orchestrator": "Do not modify files. You are a judgment-only role.",
-    }[invocation.role]
+    }
+    # native role 은 dict 직접 룩업, custom role 은 family 의 native canonical role
+    # (verifier family → verifier_functional) 의 가이드를 그대로 사용. 여기서
+    # KeyError 가 떨어지면 dispatch loop 에서 unsupported role 로 잡혀야 한다.
+    role_family_for_prompt = resolve_role_family(invocation.working_directory, invocation.role)
+    canonical_role_for_guidance = _resolve_normalize_role(invocation.role, role_family_for_prompt)
+    role_guidance = role_guidance_map.get(canonical_role_for_guidance) or role_guidance_map.get(invocation.role)
+    if role_guidance is None:
+        raise AdapterExecutionError(
+            f"No role_guidance template for role={invocation.role!r} family={role_family_for_prompt!r}"
+        )
+    scope_guidance = scope_guidance_map.get(canonical_role_for_guidance) or scope_guidance_map.get(invocation.role)
+    if scope_guidance is None:
+        # custom verifier 같은 family 케이스에서 위의 룩업이 다 실패할 일은 없지만,
+        # 안전 fallback 으로 verifier 의 scope rule 을 쓴다.
+        scope_guidance = scope_guidance_map["verifier_functional"]
     format_rule = (
         "Return exactly one JSON object conforming to utterance.v1 (the schema at "
         "Schema path). The OUTER envelope must be plain JSON — no markdown, no outer "
@@ -474,6 +516,191 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
         "If a list field has nothing to report, return an empty array.\n"
         "If you are unsure, choose the safest schema-valid response.\n"
     )
+
+
+def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, Any]]:
+    """Return the domain's custom role declarations from `domains/<id>/roles.yaml`.
+
+    Returns [] when (a) no domain id is resolvable, (b) the roles.yaml is
+    absent, (c) the file cannot be read or parsed, or (d) the file contains
+    no usable entries. Each returned entry is a dict with at least 'id'
+    (str), 'family' (str), and optional 'display' / 'default_provider'.
+    Invalid entries are silently skipped — a single malformed row should
+    not break role discovery for the rest of the file.
+
+    The yaml is read with the project's local pyyaml shim if available.
+    Failure modes are intentionally tolerant: this function is called from
+    every adapter invocation, so a parsing exception here would block
+    every cycle until the file is fixed. Surfacing it as "no custom roles"
+    keeps the legacy 5-role engine working while the domain owner fixes
+    the file.
+    """
+    domain_id = _resolve_domain_id(working_directory)
+    if not domain_id:
+        return []
+    roles_path = DOMAINS_ROOT / domain_id / "roles.yaml"
+    if not roles_path.exists():
+        return []
+    try:
+        text = roles_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    parsed = _parse_yaml_loose(text)
+    if not isinstance(parsed, dict):
+        return []
+    raw_roles = parsed.get("roles")
+    if not isinstance(raw_roles, list):
+        return []
+    cleaned: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for entry in raw_roles:
+        if not isinstance(entry, dict):
+            continue
+        role_id = str(entry.get("id") or "").strip()
+        family = str(entry.get("family") or "").strip()
+        if not role_id or not family:
+            continue
+        if not _ROLE_ID_RE.match(role_id):
+            continue
+        # native id 와 충돌하면 도메인 선언이 우선이 아니라 무시 — native 는
+        # 엔진이 보장하는 안정 표면이고 도메인이 silently override 하면
+        # 다른 코드 경로가 깨질 수 있다.
+        if role_id in _NATIVE_ROLES:
+            continue
+        if role_id in seen_ids:
+            continue
+        if family not in SUPPORTED_CUSTOM_FAMILIES:
+            continue
+        seen_ids.add(role_id)
+        cleaned.append(
+            {
+                "id": role_id,
+                "family": family,
+                "display": str(entry.get("display") or role_id),
+                "default_provider": str(entry.get("default_provider") or "").strip() or None,
+            }
+        )
+    return cleaned
+
+
+def _parse_yaml_loose(text: str) -> Any:
+    """Parse a roles.yaml file accepting either JSON or YAML-block shape.
+
+    The project ships a JSON-backed yaml shim (`orch-engine/yaml.py`), so
+    `yaml.safe_load` here actually parses JSON. Domain authors are likely
+    to write real YAML, so we try the shim first and fall back to a
+    minimal YAML-block parser sufficient for the documented shape:
+
+        roles:
+          - id: <ident>
+            family: verifier
+            display: ...
+            default_provider: ...
+
+    Returns whatever the first successful parser produced, or None when
+    everything fails. The caller treats None as 'no custom roles', so a
+    malformed file degrades gracefully without breaking native cycles.
+    """
+    parsed: Any = None
+    try:
+        import yaml as _yaml  # type: ignore
+        parsed = _yaml.safe_load(text)
+    except Exception:  # noqa: BLE001
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
+        return parsed
+    # Fallback YAML-block parser for `roles:` list-of-dicts.
+    lines = [line.rstrip() for line in text.splitlines()]
+    roles: list[dict[str, str]] = []
+    in_roles = False
+    current: dict[str, str] | None = None
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if raw.startswith("roles:"):
+            in_roles = True
+            continue
+        if not in_roles:
+            continue
+        stripped = raw.strip()
+        if stripped.startswith("- "):
+            if current is not None:
+                roles.append(current)
+            current = {}
+            after_dash = stripped[2:].strip()
+            if ":" in after_dash:
+                key, _, value = after_dash.partition(":")
+                current[key.strip()] = value.strip().strip("'\"")
+            continue
+        if current is not None and ":" in stripped:
+            key, _, value = stripped.partition(":")
+            current[key.strip()] = value.strip().strip("'\"")
+    if current is not None:
+        roles.append(current)
+    return {"roles": roles}
+
+
+_ROLE_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def resolve_role_set(working_directory: str | Path) -> frozenset[str]:
+    """Return native 5 roles plus the domain's declared custom role ids."""
+    custom_ids = {entry["id"] for entry in _load_domain_custom_roles(working_directory)}
+    return frozenset(_NATIVE_ROLES | custom_ids)
+
+
+def resolve_role_family(working_directory: str | Path, role: str) -> str | None:
+    """Return the family for a role id (native or domain-declared), else None."""
+    if role in _NATIVE_ROLE_FAMILY:
+        return _NATIVE_ROLE_FAMILY[role]
+    for entry in _load_domain_custom_roles(working_directory):
+        if entry["id"] == role:
+            return entry["family"]
+    return None
+
+
+def resolve_role_default_provider(working_directory: str | Path, role: str) -> str | None:
+    """Return the domain-declared default provider for a custom role, or None."""
+    for entry in _load_domain_custom_roles(working_directory):
+        if entry["id"] == role:
+            return entry.get("default_provider")
+    return None
+
+
+def _resolve_role_timeout(role: str, family: str | None) -> int:
+    if role in ROLE_TIMEOUTS:
+        return ROLE_TIMEOUTS[role]
+    return _FAMILY_DEFAULT_TIMEOUTS.get(family or "", 300)
+
+
+def _resolve_coercer(role: str, family: str | None):
+    """Return a utterance-to-legacy coercer for the given role.
+
+    Native roles look up `_UTTERANCE_COERCERS` directly. Custom roles fall
+    back to the family default — for family="verifier" that means treating
+    the payload as verifier_functional shape (result/score/findings/
+    evidence/blocking_issues/suggested_actions). Returns None for
+    unsupported families so the caller can raise an explicit error.
+    """
+    if role in _UTTERANCE_COERCERS:
+        return _UTTERANCE_COERCERS[role]
+    if family == "verifier":
+        return _coerce_verifier_functional_utterance_to_legacy
+    return None
+
+
+def _resolve_normalize_role(role: str, family: str | None) -> str:
+    """Return the role key `_normalize_role_payload` should branch on.
+
+    Custom roles delegate to their family's native canonical role. This
+    keeps `_normalize_role_payload` itself simple (5-role switch) — the
+    family fan-in happens here.
+    """
+    if role in _NATIVE_ROLES:
+        return role
+    if family == "verifier":
+        return "verifier_functional"
+    return role  # caller will hit the `return payload` passthrough
 
 
 def _resolve_domain_id(working_directory: str | Path) -> str | None:

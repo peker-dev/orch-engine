@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import yaml
 
+from adapters import base as _adapter_base
 from adapters.base import (
     AdapterExecutionError,
     AdapterFatalError,
@@ -554,11 +555,45 @@ def run_cycle(args: argparse.Namespace) -> int:
                     detail=f"decision={decision.get('decision')}",
                 )
             else:
-                # Unknown speaker — let the except block below emit the single
-                # _log_step_end so stdout stays clean (avoids the duplicate
-                # "완료 X.Xs" line that would otherwise appear from calling
-                # _log_step_end here + again in the catch block).
-                raise AdapterExecutionError(f"알 수 없는 speaker 지명: {speaker!r}")
+                # P0-R 2 (D9/D11, 2026-05-06): native 5 역할 외 발언자는 도메인이
+                # `domains/<id>/roles.yaml` 로 선언한 custom 역할일 수 있다. 1차 MVP
+                # 는 family="verifier" 만 지원 — 다른 family 는 unsupported 로 거부.
+                role_family = _adapter_base.resolve_role_family(str(target_root), speaker)
+                if role_family == "verifier":
+                    if loop_state["task"] is None:
+                        raise AdapterExecutionError(
+                            f"{speaker} 발화 요청되었으나 task 가 없습니다."
+                        )
+                    review, utt = _run_verifier(
+                        target_root=target_root,
+                        runtime=runtime,
+                        artifacts=artifacts,
+                        roles_config=roles_config,
+                        task=loop_state["task"],
+                        role=speaker,
+                        # custom verifier 는 functional 흐름의 한 갈래로 간주.
+                        # 별도 EngineState 신설은 1차 MVP 밖.
+                        state=EngineState.VERIFYING_FUNCTIONAL,
+                        cycle_index=cycle_index,
+                    )
+                    # custom verifier review 는 functional/human 어느 쪽도 덮지 않게
+                    # 별도 슬롯에 보관. orchestrator 가 reviews/<role>_latest.json 으로
+                    # 디스크에서 직접 합쳐 본다.
+                    loop_state.setdefault("custom_reviews", {})[speaker] = review
+                    _log_step_end(
+                        cycle_index, step_no, max_utterances, speaker, adapter_name,
+                        step_ctx,
+                        detail=(
+                            f"result={review.get('result')} "
+                            f"score={_fmt_score(review.get('score'))}"
+                        ),
+                    )
+                else:
+                    # Unknown speaker — let the except block below emit the single
+                    # _log_step_end so stdout stays clean (avoids the duplicate
+                    # "완료 X.Xs" line that would otherwise appear from calling
+                    # _log_step_end here + again in the catch block).
+                    raise AdapterExecutionError(f"알 수 없는 speaker 지명: {speaker!r}")
         except (AdapterFatalError, AdapterExecutionError) as exc:
             # step_ctx 아직 끝나지 않은 경우 대비: _log_step_end 가 이미 호출된 분기
             # (예: orchestrator decision 에러) 에서도 heartbeat 가 중복 종료되지 않도록,
@@ -1610,7 +1645,13 @@ def _run_verifier(
             "active_role": role,
         },
     )
-    adapter = _build_adapter(roles_config.get(role, "codex_cli"))
+    # P0-R 2 (2026-05-06): custom role provider fallback. roles_config 에 매핑이
+    # 없으면 도메인 roles.yaml 의 default_provider, 그것도 없으면 codex_cli.
+    provider_name = roles_config.get(role)
+    if not provider_name:
+        domain_default = _adapter_base.resolve_role_default_provider(str(target_root), role)
+        provider_name = domain_default or "codex_cli"
+    adapter = _build_adapter(str(provider_name))
     result = adapter.invoke(
         Invocation(
             role=role,
@@ -1620,9 +1661,14 @@ def _run_verifier(
         )
     )
     payload = result.payload or {}
-    review_path = (
-        "reviews/functional_latest.json" if role == "verifier_functional" else "reviews/human_latest.json"
-    )
+    # native 5 역할은 기존 review path 를 그대로 유지 (downstream 코드가 의존).
+    # custom 역할은 reviews/<role>_latest.json 으로 분리 저장.
+    if role == "verifier_functional":
+        review_path = "reviews/functional_latest.json"
+    elif role == "verifier_human":
+        review_path = "reviews/human_latest.json"
+    else:
+        review_path = f"reviews/{role}_latest.json"
     review_payload: dict[str, object] = {
         "role": role,
         "status": result.status,
@@ -1633,17 +1679,19 @@ def _run_verifier(
         "suggested_actions": payload.get("suggested_actions", []),
         "cycle": cycle_index,
     }
-    if role == "verifier_functional":
-        review_payload["evidence"] = payload.get("evidence", [])
-        review_payload["blocking_issues"] = payload.get("blocking_issues", [])
-    else:
+    # custom verifier 는 functional 형태 (evidence + blocking_issues) 를 따른다.
+    # verifier_human 만 strengths / comparison_notes 분기.
+    if role == "verifier_human":
         review_payload["strengths"] = payload.get("strengths", [])
         review_payload["comparison_notes"] = payload.get("comparison_notes", [])
+    else:
+        review_payload["evidence"] = payload.get("evidence", [])
+        review_payload["blocking_issues"] = payload.get("blocking_issues", [])
     runtime.write_json(review_path, review_payload)
     artifacts.register(role, f".orch/{review_path}", result.summary)
     runtime.append_event(f"{role}_completed", {"cycle": cycle_index, "summary": result.summary})
 
-    provider_id = roles_config.get(role, "unknown")
+    provider_id = str(provider_name) if provider_name else "unknown"
     try:
         score_val = float(payload.get("score", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -1651,20 +1699,8 @@ def _run_verifier(
     result_val = str(payload.get("result", "pass") or "pass")
     findings = [str(f) for f in (payload.get("findings") or [])]
     suggested_actions = [str(s) for s in (payload.get("suggested_actions") or [])]
-    if role == "verifier_functional":
-        _append_verifier_functional_timeline(
-            runtime,
-            cycle_index=cycle_index,
-            summary=str(result.summary or ""),
-            result=result_val,
-            score=score_val,
-            findings=findings,
-            evidence=[str(e) for e in (payload.get("evidence") or [])],
-            blocking_issues=[str(b) for b in (payload.get("blocking_issues") or [])],
-            suggested_actions=suggested_actions,
-            provider_id=provider_id,
-        )
-    else:
+    # custom verifier 는 functional timeline shape 을 따른다 (1차 MVP).
+    if role == "verifier_human":
         _append_verifier_human_timeline(
             runtime,
             cycle_index=cycle_index,
@@ -1674,6 +1710,19 @@ def _run_verifier(
             findings=findings,
             strengths=[str(s) for s in (payload.get("strengths") or [])],
             comparison_notes=[str(c) for c in (payload.get("comparison_notes") or [])],
+            suggested_actions=suggested_actions,
+            provider_id=provider_id,
+        )
+    else:
+        _append_verifier_functional_timeline(
+            runtime,
+            cycle_index=cycle_index,
+            summary=str(result.summary or ""),
+            result=result_val,
+            score=score_val,
+            findings=findings,
+            evidence=[str(e) for e in (payload.get("evidence") or [])],
+            blocking_issues=[str(b) for b in (payload.get("blocking_issues") or [])],
             suggested_actions=suggested_actions,
             provider_id=provider_id,
         )
