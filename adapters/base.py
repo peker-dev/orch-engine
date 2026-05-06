@@ -589,6 +589,12 @@ def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, A
         next_speaker_default = str(
             entry.get("next_speaker_default") or ""
         ).strip() or None
+        # P0-R 7 옵션 C 다음 stride: 도메인이 runner-specific 설정을 자유롭게 적을 수
+        # 있도록 `runner_config` 자유 dict 를 보존. unity_batchmode 같은 runner 가
+        # unity_executable / unity_method / project_subpath 등을 여기서 읽는다.
+        # 엔진은 내용을 해석하지 않고 그대로 전달.
+        runner_config_raw = entry.get("runner_config")
+        runner_config = runner_config_raw if isinstance(runner_config_raw, dict) else None
         cleaned.append(
             {
                 "id": role_id,
@@ -596,6 +602,7 @@ def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, A
                 "display": str(entry.get("display") or role_id),
                 "default_provider": str(entry.get("default_provider") or "").strip() or None,
                 "next_speaker_default": next_speaker_default,
+                "runner_config": runner_config,
             }
         )
     _CUSTOM_ROLES_CACHE[cache_key] = cleaned

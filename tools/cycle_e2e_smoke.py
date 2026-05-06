@@ -25,6 +25,7 @@ Scenarios (post Phase 2 P1-5):
     - custom_verifier_routing                : P0-R 2 (D9/D11) — 도메인 roles.yaml 의 custom verifier 라우팅
     - runner_routes_external_result          : 옵션 C 1차 — echo_runner 가 BaseRunnerAdapter 경로로 utterance 합성
     - runner_nonzero_exit_routes_normally    : 옵션 C 1차 — runner 실패 시 엔진 가로채지 않고 cycle 진행
+    - unity_batchmode_dry_run                : 옵션 C 다음 — Unity 미설치 환경 dry-run 인터페이스 회귀
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -1605,6 +1606,115 @@ def _scenario_runner_routes_external_result(sandbox: Path) -> ScenarioResult:
         shutil.rmtree(test_domain_dir, ignore_errors=True)
 
 
+def _scenario_unity_batchmode_dry_run(sandbox: Path) -> ScenarioResult:
+    """옵션 C 다음 stride: unity_batchmode runner 가 Unity 미설치 환경 (UNITY_EDITOR_PATH
+    미설정) 에서 dry-run mode 로 진입해 인자만 빌드하고 fake pass 결과를 돌려준다.
+    sandbox / CI 환경에서도 인터페이스 회귀를 보장. 박제관 PC 라이브 검증은 별도.
+    """
+    from adapters import base as _ab
+    from uuid import uuid4 as _uuid4
+
+    test_domain_id = f"__test_unity_dryrun_{_uuid4().hex[:8]}__"
+    test_domain_dir = Path(_ab.ENGINE_ROOT) / "domains" / test_domain_id
+    test_domain_dir.mkdir(parents=True, exist_ok=True)
+    # roles.yaml 을 JSON 형식으로 적어 project yaml.py shim (JSON-only) 도 nested
+    # runner_config 를 파싱할 수 있게 한다.
+    (test_domain_dir / "roles.yaml").write_text(
+        json.dumps(
+            {
+                "roles": [
+                    {
+                        "id": "verifier_unity_play",
+                        "family": "verifier",
+                        "default_provider": "unity_batchmode",
+                        "next_speaker_default": "verifier_human",
+                        "runner_config": {
+                            "unity_method": "OrchSmoke.RunPlay",
+                            # unity_executable 미설정 → dry-run 진입.
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    target = sandbox / "unity-dryrun"
+    original_build_adapter = app._build_adapter
+    # UNITY_EDITOR_PATH 환경변수가 우연히 설정돼 있으면 dry-run 진입이 안 되므로 임시 제거.
+    import os as _os
+    saved_env = _os.environ.pop("UNITY_EDITOR_PATH", None)
+    try:
+        _init_project(target)
+        session_path = target / ".orch" / "runtime" / "session.json"
+        session_data = json.loads(session_path.read_text(encoding="utf-8"))
+        session_data["domain"] = test_domain_id
+        session_path.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        roles_path = target / ".orch" / "config" / "roles.yaml"
+        roles_data = json.loads(roles_path.read_text(encoding="utf-8"))
+        roles_data.setdefault("roles", {})["verifier_unity_play"] = "unity_batchmode"
+        roles_path.write_text(
+            json.dumps(roles_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        plan = [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "planner": {"next_speaker": "builder"},
+                    "builder": {"next_speaker": "verifier_unity_play"},
+                    "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+                    "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
+                },
+            }
+        ]
+        role_adapters: dict[str, ScriptedAdapter] = {
+            "planner": ScriptedAdapter("planner", plan),
+            "builder": ScriptedAdapter("builder", plan),
+            "verifier_human": ScriptedAdapter("verifier_human", plan),
+            "orchestrator": ScriptedAdapter("orchestrator", plan),
+        }
+        _install_role_adapters(role_adapters, fallback_build_adapter=original_build_adapter)
+
+        rc = _run_cycle(target)
+        if rc != 0:
+            return ScenarioResult("unity_batchmode_dry_run", False, f"run_cycle rc={rc}")
+        review_path = target / ".orch" / "reviews" / "verifier_unity_play_latest.json"
+        if not review_path.exists():
+            return ScenarioResult(
+                "unity_batchmode_dry_run", False,
+                "reviews/verifier_unity_play_latest.json was not written",
+            )
+        review_data = json.loads(review_path.read_text(encoding="utf-8"))
+        if review_data.get("result") != "pass":
+            return ScenarioResult(
+                "unity_batchmode_dry_run", False,
+                f"dry-run review.result={review_data.get('result')!r} != 'pass'",
+            )
+        # dry-run 로그 파일이 생성됐는지 확인.
+        log_dir = target / ".orch" / "runtime" / "unity_logs"
+        if not log_dir.exists() or not list(log_dir.glob("unity_*.log")):
+            return ScenarioResult(
+                "unity_batchmode_dry_run", False,
+                "dry-run log file not written under .orch/runtime/unity_logs/",
+            )
+        return ScenarioResult(
+            "unity_batchmode_dry_run", True,
+            "unity_batchmode dry-run 이 인자 빌드 + 로그 파일 + fake pass 정상 합성",
+        )
+    finally:
+        if saved_env is not None:
+            _os.environ["UNITY_EDITOR_PATH"] = saved_env
+        shutil.rmtree(test_domain_dir, ignore_errors=True)
+
+
 def _scenario_runner_nonzero_exit_routes_normally(sandbox: Path) -> ScenarioResult:
     """옵션 C 1차 stride: runner 가 exit_code=1 을 돌려주면 utterance.result='fail' 로
     합성되지만 엔진은 가로채지 않고 정상 흐름 진행 (orchestrator 가 needs_iteration 결정).
@@ -1742,6 +1852,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "custom_verifier_routing": _scenario_custom_verifier_routing,
     "runner_routes_external_result": _scenario_runner_routes_external_result,
     "runner_nonzero_exit_routes_normally": _scenario_runner_nonzero_exit_routes_normally,
+    "unity_batchmode_dry_run": _scenario_unity_batchmode_dry_run,
 }
 
 

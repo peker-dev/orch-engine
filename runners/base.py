@@ -166,6 +166,22 @@ def _resolve_next_speaker(working_directory: str | Path, role: str) -> str | Non
     return None
 
 
+def resolve_runner_config(working_directory: str | Path, role: str) -> dict:
+    """Look up `runner_config` (free-form dict) for a custom role.
+
+    Returns an empty dict when the role has no `runner_config` field — runners
+    that need configuration should validate their own required keys and raise
+    AdapterFatalError with a domain-author-friendly message.
+    """
+    from adapters.base import _load_domain_custom_roles
+
+    for entry in _load_domain_custom_roles(working_directory):
+        if entry.get("id") == role:
+            cfg = entry.get("runner_config")
+            return dict(cfg) if isinstance(cfg, dict) else {}
+    return {}
+
+
 def _default_verdict(exit_code: int) -> str:
     return "pass" if exit_code == 0 else "fail"
 

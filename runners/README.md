@@ -48,3 +48,10 @@ RUNNER = MyRunner()
 ## 참조 구현
 
 `echo_runner.py` — 외부 의존성 없이 invocation 을 그대로 echo 하는 reference runner. 인터페이스 회귀 검증용.
+
+`unity_batchmode.py` — 옵션 C 다음 stride. Unity 를 batchmode 로 spawn 하고 로그 파일을 회수해 verdict 산출. Unity 미설치 환경에서는 `dry_run` 모드로 인자만 빌드 + fake pass — 박제관 PC 라이브 검증과 sandbox 회귀를 분리. 도메인 `roles.yaml` entry 의 `runner_config` 자유 dict 에서 다음 키 읽음:
+- `unity_executable` (절대 경로 또는 PATH 안 이름; 미설정 시 `UNITY_EDITOR_PATH` 환경변수, 둘 다 없으면 dry-run).
+- `unity_method` (필수, executeMethod 인자).
+- `project_subpath` (옵션).
+- `extra_args` (옵션, list[str]).
+- `timeout_sec` (옵션, 기본 600).
