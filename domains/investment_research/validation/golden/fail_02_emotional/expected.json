@@ -1,6 +1,0 @@
-{
-  "domain": "investment_research",
-  "label": "fail",
-  "expected_violations": ["emotional_qualifier"],
-  "note": "uses '유망' in signal section — violates anti-bias rule"
-}

@@ -1,9 +1,0 @@
-{
-  "roles": {
-    "planner": "claude_cli",
-    "builder": "claude_cli",
-    "verifier_functional": "codex_cli",
-    "verifier_human": "codex_cli",
-    "orchestrator": "codex_cli"
-  }
-}

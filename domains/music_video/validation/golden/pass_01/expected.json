@@ -1,6 +1,0 @@
-{
-  "domain": "music_video",
-  "label": "pass",
-  "expected_violations": [],
-  "note": "스테이지 게이트 정상 통과. 파일 배치 정합, 장르 일관."
-}

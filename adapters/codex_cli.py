@@ -1,70 +1,138 @@
+"""CodexCliAdapter — codex CLI 비대화형 호출.
+
+`codex exec --output-schema <file>` 로 final response 를 schema 에 맞춰 받는다.
+codex 는 agentic 출력이라 stdout 에 trace 가 섞일 수 있어, 마지막 / 첫 JSON 객체를
+순차적으로 시도하는 robust 파서를 둔다.
+
+설계 메모:
+- `--sandbox read-only` 로 LLM 이 임의 파일을 수정하지 못하게 잠근다.
+- `--skip-git-repo-check` — orch-engine/ 자체가 아직 git repo 가 아님.
+- `--ignore-user-config` 는 박제관 글로벌 설정 충돌을 피하지만, 인증 흐름과 기본
+  모델 선택까지 영향을 줄 수 있어 일단 끄지 않는다 (live smoke 결과로 조정).
+- prompt 는 stdin 으로 전달해 인용 이슈를 회피한다.
+"""
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from adapters.base import BaseCliAdapter, Invocation, find_payload_candidate
+from .contracts import response_schema, system_prompt, user_prompt
 
 
-class CodexCliAdapter(BaseCliAdapter):
-    provider_id = "codex_cli"
-    provider_label = "Codex CLI"
+_JSON_OBJ_RE = re.compile(r"\{[\s\S]*?\}")
 
-    def build_command(
+
+class CodexCliAdapter:
+    name = "codex_cli"
+
+    def __init__(
         self,
-        *,
-        invocation: Invocation,
-        schema_path: Path,
-        schema_text: str,
-        provider_result_path: Path,
-    ) -> tuple[list[str], bool]:
-        # P0-R 7 옵션 A (22차 세션 2, 2026-04-30): builder / verifier_functional 은
-        # 무거운 외부 시스템 (Unity batchmode 등) 을 spawn 해야 하는 역할이라
-        # codex 의 workspace-write sandbox 가 파일 *삭제* 를 차단하는 정책에 부딪힘.
-        # Unity 가 시동 중 파일 삭제 시도 → "project folder is read only" → batchmode abort.
-        # 증거: test-phase5-unity cycle 3 stderr (2026-04-29) 의
-        # `codex_core::tools::router: ...Remove-Item... rejected: blocked by policy`.
-        # 응급 처치로 두 역할만 danger-full-access 로 격상. 장기 정답은 옵션 C
-        # (엔진 표준 external runner 로 Unity 호출 분리 — `memory/next-work.md` P0-R 7).
-        if invocation.role in {"builder", "verifier_functional"}:
-            sandbox_mode = "danger-full-access"
-        else:
-            sandbox_mode = "read-only"
-        # Do NOT pass `--output-schema`. Codex CLI wires that flag into OpenAI's
-        # strict `response_format`, which rejects JSON Schema features we rely on
-        # for utterance.v1 (optional keys without being in `required`, allOf, etc.).
-        # Schema conformance is enforced by the prompt + engine-side _validate_schema.
-        return (
-            [
-                "codex",
-                "exec",
-                "-",
-                "--cd",
-                str(Path(invocation.working_directory).resolve()),
+        model: str | None = None,
+        timeout: int = 300,
+        executable: str = "codex",
+        sandbox: str = "read-only",
+    ) -> None:
+        resolved = shutil.which(executable)
+        if resolved is None:
+            raise FileNotFoundError(f"{executable!r} CLI not found on PATH")
+        self.executable = resolved
+        self.model = model
+        self.timeout = timeout
+        self.sandbox = sandbox
+
+    def invoke(self, role: str, context: dict[str, Any]) -> dict[str, Any]:
+        schema = response_schema(role)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(schema, f, ensure_ascii=False)
+            schema_path = Path(f.name)
+
+        try:
+            cmd = [
+                self.executable, "exec",
                 "--skip-git-repo-check",
-                "--sandbox",
-                sandbox_mode,
-                "-o",
-                str(provider_result_path),
-            ],
-            True,
-        )
+                "--sandbox", self.sandbox,
+                "--output-schema", str(schema_path),
+                "--color", "never",
+                "--ephemeral",
+            ]
+            if self.model:
+                cmd += ["--model", self.model]
+            cmd.append("-")  # read prompt from stdin
 
-    def extract_payload(
-        self,
-        *,
-        stdout_text: str,
-        provider_result_path: Path,
-        schema: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not provider_result_path.exists():
-            raise FileNotFoundError(f"Provider result file not found: {provider_result_path}")
-        result_text = provider_result_path.read_text(encoding="utf-8").strip()
-        if not result_text:
-            raise ValueError(f"Provider result file is empty: {provider_result_path}")
-        parsed = json.loads(result_text)
-        found = find_payload_candidate(parsed, set(schema.get("required", [])))
-        if found is None:
-            raise ValueError("Could not extract role payload from Codex result file.")
-        return found
+            prompt = system_prompt(role) + "\n\n" + user_prompt(role, context)
+            completed = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                encoding="utf-8",
+            )
+        finally:
+            try:
+                schema_path.unlink()
+            except OSError:
+                pass
+
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"codex CLI failed rc={completed.returncode}: "
+                f"{completed.stderr.strip()[:500] or completed.stdout.strip()[:500]}"
+            )
+        return _parse_stdout(completed.stdout)
+
+
+def _parse_stdout(stdout: str) -> dict[str, Any]:
+    text = stdout.strip()
+    if not text:
+        raise RuntimeError("empty stdout from codex CLI")
+
+    # 1) stdout 전체가 단일 JSON 인 경우
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+    except json.JSONDecodeError:
+        pass
+
+    # 2) 마지막부터 거꾸로 brace 매칭으로 valid JSON 찾기
+    obj = _last_balanced_object(text)
+    if obj is not None:
+        return obj
+
+    # 3) 첫 번째 JSON 객체 fallback
+    match = _JSON_OBJ_RE.search(text)
+    if not match:
+        raise RuntimeError(f"no JSON object in codex stdout: {text[-400:]}")
+    return json.loads(match.group(0))
+
+
+def _last_balanced_object(text: str) -> dict[str, Any] | None:
+    """text 끝쪽에 있는 가장 마지막 balanced `{...}` 를 찾아 dict 로 반환."""
+    end = text.rfind("}")
+    while end != -1:
+        depth = 0
+        for i in range(end, -1, -1):
+            ch = text[i]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[i : end + 1]
+                    try:
+                        loaded = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+                    if isinstance(loaded, dict):
+                        return loaded
+                    break
+        end = text.rfind("}", 0, end)
+    return None

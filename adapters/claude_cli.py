@@ -1,62 +1,118 @@
+"""ClaudeCliAdapter — claude CLI 비대화형 호출.
+
+`claude --print --output-format json --json-schema <schema>` 로 schema-constrained
+응답을 받고, wrapper 의 `result` 필드에서 실제 JSON 을 꺼낸다.
+
+설계 메모:
+- `--bare` 는 ANTHROPIC_API_KEY 를 강제하므로 OAuth 로그인 사용자에서는 못 쓴다.
+  대신 `--no-session-persistence` + `--tools ""` + `--append-system-prompt` 만으로
+  프로젝트 CLAUDE.md 의 영향을 줄인다.
+- 응답 파싱 실패는 fallback 하지 않고 RuntimeError 로 명시 실패시킨다 — 어댑터에서
+  조용히 'blocked' 를 만들면 자동 개선 루프가 가짜 진행을 하기 때문.
+"""
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import re
+import shutil
+import subprocess
 from typing import Any
 
-from adapters.base import BaseCliAdapter, Invocation, find_first_dict_candidate, find_payload_candidate
+from .contracts import response_schema, system_prompt, user_prompt
 
 
-class ClaudeCliAdapter(BaseCliAdapter):
-    provider_id = "claude_cli"
-    provider_label = "Claude CLI"
+_JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}")
 
-    def build_command(
+
+class ClaudeCliAdapter:
+    name = "claude_cli"
+
+    def __init__(
         self,
-        *,
-        invocation: Invocation,
-        schema_path: Path,
-        schema_text: str,
-        provider_result_path: Path,
-    ) -> tuple[list[str], bool]:
-        permission_mode = "bypassPermissions" if invocation.role in {"builder", "verifier_functional"} else "dontAsk"
-        return (
-            [
-                "claude",
-                "-p",
-                "--output-format",
-                "json",
-                "--json-schema",
-                schema_text,
-                "--permission-mode",
-                permission_mode,
-                "--add-dir",
-                str(Path(invocation.working_directory).resolve()),
-            ],
-            True,
+        model: str | None = None,
+        timeout: int = 240,
+        executable: str = "claude",
+    ) -> None:
+        resolved = shutil.which(executable)
+        if resolved is None:
+            raise FileNotFoundError(f"{executable!r} CLI not found on PATH")
+        self.executable = resolved
+        self.model = model
+        self.timeout = timeout
+
+    def invoke(self, role: str, context: dict[str, Any]) -> dict[str, Any]:
+        schema = response_schema(role)
+        cmd = [
+            self.executable,
+            "--print",
+            "--output-format", "json",
+            "--json-schema", json.dumps(schema, ensure_ascii=False),
+            "--append-system-prompt", system_prompt(role),
+            "--tools", "",
+            "--no-session-persistence",
+            "--exclude-dynamic-system-prompt-sections",
+            "--setting-sources", "",
+        ]
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd.append(user_prompt(role, context))
+
+        completed = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=self.timeout, encoding="utf-8"
         )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"claude CLI failed rc={completed.returncode}: "
+                f"{completed.stderr.strip()[:500] or completed.stdout.strip()[:500]}"
+            )
+        return _parse_stdout(completed.stdout)
 
-    def extract_payload(
-        self,
-        *,
-        stdout_text: str,
-        provider_result_path: Path,
-        schema: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not stdout_text.strip():
-            raise ValueError("Claude CLI returned empty stdout.")
-        parsed = json.loads(stdout_text)
-        if isinstance(parsed, dict):
-            wrapper_type = str(parsed.get("type", "")).lower()
-            if parsed.get("is_error") is True or wrapper_type in {"error", "result_error"}:
-                message = str(parsed.get("error") or parsed.get("message") or parsed.get("result") or "unknown Claude wrapper error")
-                raise ValueError(f"Claude CLI wrapper reported error: {message}")
-        required = set(schema.get("required", []))
-        found = find_payload_candidate(parsed, required)
-        if found is None:
-            found = find_first_dict_candidate(parsed.get("result")) if isinstance(parsed, dict) else None
-        if found is None:
-            found = find_first_dict_candidate(parsed)
-        if found is None:
-            raise ValueError("Could not extract role payload from Claude stdout.")
-        return found
+
+def _parse_stdout(stdout: str) -> dict[str, Any]:
+    text = stdout.strip()
+    if not text:
+        raise RuntimeError("empty stdout from claude CLI")
+    try:
+        wrapper = json.loads(text)
+    except json.JSONDecodeError:
+        return _extract_object(text)
+
+    if isinstance(wrapper, dict):
+        if wrapper.get("is_error"):
+            raise RuntimeError(f"claude returned error: {wrapper.get('result') or wrapper}")
+
+        # schema-constrained 응답은 `structured_output` 필드에 들어옴 (실측 기준)
+        structured = wrapper.get("structured_output")
+        if isinstance(structured, dict):
+            return structured
+        if isinstance(structured, str) and structured.strip():
+            return _extract_object(structured)
+
+        # 일부 버전에서는 `result` 에 JSON string 이 박혀 올 수도 있음 — fallback
+        result = wrapper.get("result")
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str) and result.strip():
+            return _extract_object(result)
+
+        # wrapper 자체가 응답 dict 인 경우 (drift)
+        if "role" in wrapper or {"verdict", "decision", "title", "summary"} & wrapper.keys():
+            return wrapper
+
+        raise RuntimeError(f"no structured_output in claude wrapper: keys={list(wrapper.keys())}")
+
+    return _extract_object(text)
+
+
+def _extract_object(text: str) -> dict[str, Any]:
+    text = text.strip()
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, dict):
+            return loaded
+    except json.JSONDecodeError:
+        pass
+    match = _JSON_OBJ_RE.search(text)
+    if not match:
+        raise RuntimeError(f"no JSON object in claude stdout: {text[:300]}")
+    return json.loads(match.group(0))
