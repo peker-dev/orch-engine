@@ -300,7 +300,9 @@ def run_cycle(args: argparse.Namespace) -> int:
         project_config.setdefault("project", {})["goal_summary"] = args.goal_summary
         _write_yaml(orch_root / "config" / "project.yaml", project_config)
 
-    preflight = _run_token_preflight(project_goal, roles_config, limits_config)
+    preflight = _run_token_preflight(
+        project_goal, roles_config, limits_config, working_directory=str(target_root)
+    )
     runtime.write_json("runtime/preflight.json", preflight)
     runtime.append_event("token_preflight", preflight)
     if preflight["status"] == "block":
@@ -820,16 +822,34 @@ def _run_token_preflight(
     project_goal: str,
     roles_config: dict[str, str],
     limits_config: dict[str, object],
+    working_directory: str | Path | None = None,
 ) -> dict[str, object]:
     token_settings = limits_config.get("token_preflight", {})
     round_budget = int(token_settings.get("round_budget_tokens", 8000))
     warn_ratio = float(token_settings.get("warn_at_ratio", 0.75))
     output_reserve = int(token_settings.get("output_reserve_per_role", 400))
-    active_roles = [
-        role
-        for role in roles_config
-        if role in {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
-    ]
+    # P0-R 2 후속 (2026-05-06): preflight 추산 대상에 native 5역할 외에 도메인이
+    # 선언한 custom 역할도 포함시킨다. working_directory 가 주어지면 family 기준
+    # (native or known family) 으로 정확히 거르고, 없으면 native 5역할 + verifier_
+    # prefix 휴리스틱으로 fallback. underestimate 보다 over-estimate 가 안전.
+    _NATIVE_PREFLIGHT_ROLES = {
+        "planner", "builder", "verifier_functional", "verifier_human", "orchestrator",
+    }
+    if working_directory is not None:
+        active_roles = []
+        for role in roles_config:
+            if role in _NATIVE_PREFLIGHT_ROLES:
+                active_roles.append(role)
+                continue
+            family = _adapter_base.resolve_role_family(working_directory, role)
+            if family in _adapter_base.SUPPORTED_CUSTOM_FAMILIES:
+                active_roles.append(role)
+    else:
+        active_roles = [
+            role
+            for role in roles_config
+            if role in _NATIVE_PREFLIGHT_ROLES or role.startswith("verifier_")
+        ]
     input_estimate = ceil(len(project_goal) / 4) + (len(active_roles) * 180)
     output_estimate = len(active_roles) * output_reserve
     total_estimate = input_estimate + output_estimate

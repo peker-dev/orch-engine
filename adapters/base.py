@@ -34,7 +34,6 @@ DOMAINS_ROOT = ENGINE_ROOT / "domains"
 _NATIVE_ROLES = frozenset(
     {"planner", "builder", "verifier_functional", "verifier_human", "orchestrator"}
 )
-_SUPPORTED_ROLES = _NATIVE_ROLES  # backward-compat alias for older importers
 # D9/D11 (Phase 2 P0-R 2, 2026-05-06): 1차 MVP. 도메인이 `domains/<id>/roles.yaml`
 # 에 family="verifier" 인 custom 역할을 선언하면 엔진 코드 변경 없이 합류된다.
 # native role 은 자기 자신의 family 를 가지고, custom 역할은 roles.yaml 의
@@ -518,6 +517,13 @@ def _render_prompt(invocation: Invocation, schema_path: Path, required_keys: lis
     )
 
 
+# 도메인 roles.yaml 파싱 캐시. 단일 invoke 안에서 resolve_role_set /
+# resolve_role_family / resolve_role_default_provider 가 각각 호출돼 같은
+# 파일을 3~4회 읽는 비용을 (file path, mtime) 키로 줄인다. mtime 이 바뀌면
+# 자동으로 무효화되므로 외부에서 roles.yaml 을 수정해도 다음 호출에서 반영.
+_CUSTOM_ROLES_CACHE: dict[tuple[str, float], list[dict[str, Any]]] = {}
+
+
 def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, Any]]:
     """Return the domain's custom role declarations from `domains/<id>/roles.yaml`.
 
@@ -541,6 +547,14 @@ def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, A
     roles_path = DOMAINS_ROOT / domain_id / "roles.yaml"
     if not roles_path.exists():
         return []
+    try:
+        mtime = roles_path.stat().st_mtime
+    except OSError:
+        return []
+    cache_key = (str(roles_path), mtime)
+    cached = _CUSTOM_ROLES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     try:
         text = roles_path.read_text(encoding="utf-8")
     except OSError:
@@ -580,6 +594,7 @@ def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, A
                 "default_provider": str(entry.get("default_provider") or "").strip() or None,
             }
         )
+    _CUSTOM_ROLES_CACHE[cache_key] = cleaned
     return cleaned
 
 
@@ -776,7 +791,13 @@ def _render_domain_guide_block(invocation: Invocation) -> str:
 
 
 def _default_write_scope(invocation: Invocation) -> list[str]:
-    if invocation.role in {"builder", "verifier_functional"}:
+    # builder 와 verifier (native verifier_functional + custom family="verifier")
+    # 는 검증 단계에서 테스트 산출물·로그를 만드는 경우가 있어 working_directory
+    # 쓰기를 허용. verifier_human / orchestrator / planner 는 read-only.
+    if invocation.role == "builder":
+        return [str(Path(invocation.working_directory).resolve())]
+    family = resolve_role_family(invocation.working_directory, invocation.role)
+    if family == "verifier" and invocation.role != "verifier_human":
         return [str(Path(invocation.working_directory).resolve())]
     return []
 
