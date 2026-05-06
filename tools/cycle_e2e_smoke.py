@@ -1655,15 +1655,20 @@ def _scenario_two_cycle_feedback_terminates(sandbox: Path) -> ScenarioResult:
             "two_cycle_feedback_terminates", False,
             f"cycle2 planner.context.previous_reviews missing or empty: {previous_reviews!r}",
         )
-    # orchestrator 결과가 흘러갔는지 — 자율 피드백 루프의 핵심 채널.
-    if "orchestrator" not in previous_reviews:
+    # 자율 피드백 루프의 세 채널 (functional / human / orchestrator) 모두 흘렀는지.
+    # ScriptedAdapter verifier 가 cycle 1 에서 result="needs_iteration" 을 돌려주면
+    # _collect_previous_reviews 가 functional/human 채널에 그 결과를 채운다.
+    # orchestrator 는 derived needs_iteration → unresolved/recommendation.
+    expected_channels = ("functional", "human", "orchestrator")
+    missing = [ch for ch in expected_channels if ch not in previous_reviews]
+    if missing:
         return ScenarioResult(
             "two_cycle_feedback_terminates", False,
-            f"cycle2 planner.previous_reviews missing 'orchestrator' channel: keys={list(previous_reviews)}",
+            f"cycle2 planner.previous_reviews missing channels {missing}: keys={list(previous_reviews)}",
         )
     return ScenarioResult(
         "two_cycle_feedback_terminates", True,
-        "cycle1 verdict→cycle2 planner.previous_reviews 로 흐름 + cycle2 complete_cycle 종단",
+        "cycle1 verdict→cycle2 planner.previous_reviews 의 functional/human/orchestrator 세 채널 + cycle2 complete_cycle 종단",
     )
 
 
@@ -1728,6 +1733,40 @@ def _scenario_user_stop_blocks_cycle(sandbox: Path) -> ScenarioResult:
     return ScenarioResult(
         "user_stop_blocks_cycle", True,
         ".orch/STOP detected → cycle BLOCKED + reason 보존 + archive + event emit",
+    )
+
+
+def _scenario_user_stop_directory_does_not_loop(sandbox: Path) -> ScenarioResult:
+    """code-review 후속 회귀: `.orch/STOP` 이 파일이 아니라 디렉터리인 비정상
+    상황에서도 dispatch loop 가 무한 stop 루프에 빠지지 않고 1회 BLOCKED 후
+    디렉터리가 정리되어 다음 cycle 진입이 가능해야 한다.
+    """
+    target = sandbox / "user-stop-dir"
+    _init_project(target)
+    stop_dir = target / ".orch" / "STOP"
+    stop_dir.mkdir(parents=True, exist_ok=True)
+    plan = [{"functional": 0.95, "human": 0.95, "result": "pass"}]
+    _install_scripted_adapters(plan)
+    rc = _run_cycle(target)
+    if rc != 2:
+        return ScenarioResult(
+            "user_stop_directory_does_not_loop", False, f"expected rc=2, got rc={rc}"
+        )
+    if stop_dir.exists():
+        return ScenarioResult(
+            "user_stop_directory_does_not_loop", False,
+            "STOP directory was not removed — would cause infinite stop loop on next cycle",
+        )
+    session = _read_session(target)
+    reason = str(session.get("last_decision_reason") or "")
+    if "directory" not in reason:
+        return ScenarioResult(
+            "user_stop_directory_does_not_loop", False,
+            f"reason should mention directory: {reason!r}",
+        )
+    return ScenarioResult(
+        "user_stop_directory_does_not_loop", True,
+        "STOP 이 디렉터리여도 1회 BLOCKED + rmtree 후 다음 cycle 진입 가능",
     )
 
 
@@ -1980,6 +2019,7 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "unity_batchmode_dry_run": _scenario_unity_batchmode_dry_run,
     "user_stop_blocks_cycle": _scenario_user_stop_blocks_cycle,
     "two_cycle_feedback_terminates": _scenario_two_cycle_feedback_terminates,
+    "user_stop_directory_does_not_loop": _scenario_user_stop_directory_does_not_loop,
 }
 
 

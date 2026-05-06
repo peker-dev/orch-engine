@@ -825,29 +825,48 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+_STOP_FILE_READ_CAP = 64 * 1024  # 64 KB 면 충분 — 더 길어도 read 안 함.
+
+
 def _check_user_stop(orch_root: Path) -> str | None:
     """발화 사이마다 호출되는 사용자 stop 감지.
 
-    `.orch/STOP` 파일이 존재하면 그 내용을 reason 으로 반환하고 파일을
-    `.orch/runtime/stops/stop_<unix_ts>.txt` 로 archive (replace 실패 시 unlink).
-    내용이 비어 있으면 기본 reason 사용. 파일이 없으면 None.
+    `.orch/STOP` 이 존재하면 그 내용을 reason 으로 반환하고 파일을
+    `.orch/runtime/stops/stop_<unix_ts>_<uuid>.txt` 로 archive. 다음 cycle 에
+    STOP 이 잔류해서 무한 stop loop 가 되지 않도록 archive 가 핵심.
 
-    archive 는 다음 cycle 에 STOP 이 잔류해서 무한 stop loop 가 되지 않게
-    하기 위함. ignore_errors 패턴이 아니라 명시적 archive 실패 시 unlink
-    fallback — 파일이 어떤 형태로든 사라져야 다음 cycle 진입 가능.
+    code-review 후속 (2026-05-06) 보강:
+    - STOP 이 디렉터리인 경우: read_text → IsADirectoryError, replace 도 실패해
+      `[archive failed]` 무한 루프. shutil.rmtree 로 명시 제거 + reason 에 표식.
+    - archive 파일명에 uuid 첨가: 같은 초 동시 호출 (다른 프로세스/세션) 시 충돌
+      방지. 운용상 노이즈 reason 차단.
+    - 파일 내용은 64KB 까지만 read — 사용자가 거대한 파일을 STOP 으로 만들어도
+      메모리/archive_dir 폭발 방지.
     """
+    import shutil as _shutil
+    from uuid import uuid4 as _uuid4
+
     stop_path = orch_root / "STOP"
     if not stop_path.exists():
         return None
+    if stop_path.is_dir():
+        # 디렉터리 STOP — 비정상이지만 무한 루프는 막아야 함.
+        try:
+            _shutil.rmtree(stop_path, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return "user requested stop [STOP was a directory, removed]"
     try:
-        text = stop_path.read_text(encoding="utf-8", errors="replace").strip()
+        with stop_path.open("rb") as fh:
+            raw = fh.read(_STOP_FILE_READ_CAP)
+        text = raw.decode("utf-8", errors="replace").strip()
     except OSError:
         text = ""
     reason = text or "user requested stop"
     archive_dir = orch_root / "runtime" / "stops"
     try:
         archive_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = archive_dir / f"stop_{int(time.time())}.txt"
+        archive_path = archive_dir / f"stop_{int(time.time())}_{_uuid4().hex[:8]}.txt"
         stop_path.replace(archive_path)
     except OSError:
         try:
