@@ -47,8 +47,8 @@ class EchoRunner(BaseRunnerAdapter):
         return RunnerResult(
             exit_code=exit_code,
             summary=summary,
-            stdout_excerpt=str(override.get("stdout", "")),
-            stderr_excerpt=str(override.get("stderr", "")),
+            stdout_excerpt=str(override.get("stdout") or ""),
+            stderr_excerpt=str(override.get("stderr") or ""),
             artifact_paths=[str(p) for p in override.get("artifact_paths", []) if isinstance(p, str)],
             verdict=str(verdict) if isinstance(verdict, str) else None,
             score=score,

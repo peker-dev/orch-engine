@@ -1642,10 +1642,9 @@ def _scenario_runner_nonzero_exit_routes_normally(sandbox: Path) -> ScenarioResu
             json.dumps(roles_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        # 의도적으로 exit_code=1. echo_runner 는 invocation.context["echo"] 로
-        # override 를 받는데, dispatch loop 의 _run_verifier 가 context 에 task 와
-        # cycle 만 넣으므로, project goal 에 marker 를 박고 runner 안에서 인식하는 방법은
-        # 적합하지 않다. 대신 echo_runner 를 한 번 더 monkey-patch 해서 exit_code=1 강제.
+        # 의도적으로 exit_code=1. echo_runner 를 monkey-patch 해서 exit_code=1 강제.
+        # try/finally 가 patch 부터 _run_cycle 호출까지 모두 감싸서 _install_role_adapters
+        # 가 예외를 내거나 plan setup 에서 실패해도 RUNNER.run 은 반드시 원복된다.
         from runners import echo_runner as _er
 
         original_run = _er.RUNNER.run
@@ -1660,32 +1659,30 @@ def _scenario_runner_nonzero_exit_routes_normally(sandbox: Path) -> ScenarioResu
             )
 
         _er.RUNNER.run = failing_run  # type: ignore[method-assign]
-
-        plan = [
-            {
-                "functional": 0.5,
-                "human": 0.5,
-                "result": "needs_iteration",
-                "utterances": {
-                    "planner": {"next_speaker": "builder"},
-                    "builder": {"next_speaker": "verifier_echo"},
-                    # verifier_echo 는 runner 가 처리, next_speaker_default=verifier_human 따라감
-                    "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
-                    # orchestrator 는 ScriptedAdapter 가 derived 매핑으로 needs_iteration→iterating.
-                    # 사이클은 종료되되 BLOCKED 가 아니라 ITERATING.
-                    "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
-                },
-            }
-        ]
-        role_adapters: dict[str, ScriptedAdapter] = {
-            "planner": ScriptedAdapter("planner", plan),
-            "builder": ScriptedAdapter("builder", plan),
-            "verifier_human": ScriptedAdapter("verifier_human", plan),
-            "orchestrator": ScriptedAdapter("orchestrator", plan),
-        }
-        _install_role_adapters(role_adapters, fallback_build_adapter=original_build_adapter)
-
         try:
+            plan = [
+                {
+                    "functional": 0.5,
+                    "human": 0.5,
+                    "result": "needs_iteration",
+                    "utterances": {
+                        "planner": {"next_speaker": "builder"},
+                        "builder": {"next_speaker": "verifier_echo"},
+                        # verifier_echo 는 runner 가 처리, next_speaker_default=verifier_human 따라감
+                        "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+                        # orchestrator 는 ScriptedAdapter 가 derived 매핑으로 needs_iteration→iterating.
+                        # 사이클은 종료되되 BLOCKED 가 아니라 ITERATING.
+                        "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
+                    },
+                }
+            ]
+            role_adapters: dict[str, ScriptedAdapter] = {
+                "planner": ScriptedAdapter("planner", plan),
+                "builder": ScriptedAdapter("builder", plan),
+                "verifier_human": ScriptedAdapter("verifier_human", plan),
+                "orchestrator": ScriptedAdapter("orchestrator", plan),
+            }
+            _install_role_adapters(role_adapters, fallback_build_adapter=original_build_adapter)
             rc = _run_cycle(target)
         finally:
             _er.RUNNER.run = original_run  # type: ignore[method-assign]

@@ -42,14 +42,30 @@ from adapters.base import (
     BaseAdapter,
     Invocation,
     InvocationResult,
+    UTTERANCE_SCHEMA_PATH,
+    _check_utterance_invariants,
+    _validate_schema,
     resolve_role_family,
 )
 
 
 # Runner provider ids that collide with LLM CLI labels are blocked at
 # resolve-time, not here. This list is the source of truth referenced by
-# `core.app._build_adapter`.
+# `core.app._build_adapter`. Includes `codex_app` (handoff-only label) so a
+# runner module cannot shadow it.
 RESERVED_LLM_PROVIDERS = frozenset({"claude_cli", "codex_cli", "codex_app"})
+
+_UTTERANCE_SCHEMA_CACHE: dict[str, object] | None = None
+
+
+def _utterance_schema() -> dict:
+    """Load and cache utterance.v1 schema for runner-side validation."""
+    global _UTTERANCE_SCHEMA_CACHE
+    if _UTTERANCE_SCHEMA_CACHE is None:
+        _UTTERANCE_SCHEMA_CACHE = json.loads(
+            UTTERANCE_SCHEMA_PATH.read_text(encoding="utf-8")
+        )
+    return _UTTERANCE_SCHEMA_CACHE  # type: ignore[return-value]
 
 
 @dataclass(slots=True)
@@ -58,7 +74,9 @@ class RunnerResult:
 
     Subclasses populate this and return it; BaseRunnerAdapter handles utterance
     synthesis. `verdict` is optional — when omitted, exit_code drives the
-    default mapping (0 → pass, otherwise → fail).
+    default mapping (0 → pass, otherwise → fail). `duration_sec` is optional
+    and informational; runners that wrap a subprocess are encouraged to set it
+    so timeline / handoff readers can see how long the external work took.
     """
 
     exit_code: int
@@ -70,6 +88,7 @@ class RunnerResult:
     score: float | None = None
     findings: list[str] = field(default_factory=list)
     suggested_actions: list[str] = field(default_factory=list)
+    duration_sec: float | None = None
 
 
 class BaseRunnerAdapter(BaseAdapter, ABC):
@@ -110,6 +129,15 @@ class BaseRunnerAdapter(BaseAdapter, ABC):
                 f"Runner {self.provider_id!r} raised {type(exc).__name__}: {exc}"
             ) from exc
         utterance = _synthesize_utterance(invocation, runner_result, next_speaker)
+        # 합성 utterance 도 LLM adapter 와 동일한 스키마/invariant 검증을 통과해야 한다.
+        # subclass 가 잘못된 RunnerResult 를 돌려주면 dispatch loop 에 닿기 전에 명시적 실패.
+        try:
+            _validate_schema(utterance, _utterance_schema())
+            _check_utterance_invariants(utterance)
+        except Exception as exc:  # noqa: BLE001
+            raise AdapterExecutionError(
+                f"Runner {self.provider_id!r} synthesized invalid utterance.v1: {exc}"
+            ) from exc
         payload = _synthesize_payload(runner_result)
         return InvocationResult(
             status="ok",
@@ -142,25 +170,30 @@ def _default_verdict(exit_code: int) -> str:
     return "pass" if exit_code == 0 else "fail"
 
 
+def _build_blocking_issues(result: RunnerResult) -> list[str]:
+    """공통 blocking_issues 생성 — payload 와 utterance fenced JSON 양쪽이 동일 값 사용."""
+    if result.exit_code == 0:
+        return []
+    first_line = result.stderr_excerpt.splitlines()[0] if result.stderr_excerpt else ""
+    text = f"runner exited with code {result.exit_code}"
+    if first_line:
+        text += f": {first_line}"
+    return [text]
+
+
 def _synthesize_payload(result: RunnerResult) -> dict[str, object]:
     """Build the legacy verifier_functional payload the engine still consumes."""
     verdict = (result.verdict or _default_verdict(result.exit_code)).strip().lower()
     score = result.score
     if score is None:
         score = 1.0 if verdict == "pass" else 0.0
-    blocking_issues = []
-    if result.exit_code != 0:
-        blocking_issues.append(
-            f"runner exited with code {result.exit_code}"
-            + (f": {result.stderr_excerpt.splitlines()[0]}" if result.stderr_excerpt else "")
-        )
     return {
         "summary": result.summary or "runner completed",
         "result": verdict,
         "score": float(score),
         "findings": list(result.findings),
         "evidence": list(result.artifact_paths),
-        "blocking_issues": blocking_issues,
+        "blocking_issues": _build_blocking_issues(result),
         "suggested_actions": list(result.suggested_actions),
     }
 
@@ -170,10 +203,13 @@ def _synthesize_utterance(
 ) -> dict[str, object]:
     """Compose a utterance.v1-shaped dict from a RunnerResult.
 
-    Engine-side speakers do not embed the full fenced ```json``` block in body
-    (because the legacy coercer already pulls structured state out of the
-    payload, not the body). The body carries human-readable narrative for
-    timeline / handoff visibility.
+    Body carries human-readable narrative (summary / verdict / artifacts /
+    stdout-stderr excerpts) for timeline / handoff visibility, plus a fenced
+    ```json``` block mirroring the verifier_functional structured payload so
+    body re-parsers (timeline tools, future analyzers) see the same numbers
+    as the engine's payload path. The fenced block is a copy of
+    `_synthesize_payload` minus the `summary` key, kept in sync via
+    `_build_blocking_issues` etc.
     """
     verdict = (result.verdict or _default_verdict(result.exit_code)).strip().lower()
     body_lines = [
@@ -208,9 +244,7 @@ def _synthesize_utterance(
         ),
         "findings": list(result.findings),
         "evidence": list(result.artifact_paths),
-        "blocking_issues": [
-            f"runner exited with code {result.exit_code}"
-        ] if result.exit_code != 0 else [],
+        "blocking_issues": _build_blocking_issues(result),
         "suggested_actions": list(result.suggested_actions),
     }
     body_lines.append("")
