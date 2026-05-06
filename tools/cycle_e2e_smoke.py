@@ -26,6 +26,7 @@ Scenarios (post Phase 2 P1-5):
     - runner_routes_external_result          : 옵션 C 1차 — echo_runner 가 BaseRunnerAdapter 경로로 utterance 합성
     - runner_nonzero_exit_routes_normally    : 옵션 C 1차 — runner 실패 시 엔진 가로채지 않고 cycle 진행
     - unity_batchmode_dry_run                : 옵션 C 다음 — Unity 미설치 환경 dry-run 인터페이스 회귀
+    - user_stop_blocks_cycle                 : 사용자 stop 훅 — .orch/STOP 감지 → cycle BLOCKED + archive
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -1606,6 +1607,130 @@ def _scenario_runner_routes_external_result(sandbox: Path) -> ScenarioResult:
         shutil.rmtree(test_domain_dir, ignore_errors=True)
 
 
+def _scenario_two_cycle_feedback_terminates(sandbox: Path) -> ScenarioResult:
+    """자율 피드백 루프 종단 검증: cycle 1 needs_iteration → cycle 2 planner 가
+    이전 cycle 의 verifier suggested_actions / orchestrator unresolved_items 를
+    previous_reviews 로 받아서 cycle 2 가 complete_cycle 로 닫힌다.
+
+    `needs_iteration_then_success` 는 state 전이만 검증. 이 시나리오는 한 단계
+    더 들어가서 "두 번째 cycle 의 planner 가 실제로 이전 결과를 context 로
+    봤는지" 를 ScriptedAdapter.invocations 의 마지막 planner context 로 직접
+    검증한다. D13 v3 unity cycle 2 → 3 자율 추적 작동 관측을 회귀로 못박음.
+    """
+    target = sandbox / "two-cycle-feedback"
+    _init_project(target)
+    plan = [
+        {
+            "functional": 0.4,
+            "human": 0.4,
+            "result": "needs_iteration",
+            # ScriptedAdapter 의 verifier 가 출력하는 suggested_actions 를 변경 못 하므로
+            # 기본 빈 리스트지만, orchestrator 가 derived needs_iteration → unresolved_items
+            # 가 default 로 만들어진다. previous_reviews.orchestrator 만 검증해도 충분.
+        },
+        {"functional": 0.9, "human": 0.9, "result": "pass"},
+    ]
+    adapters = _install_scripted_adapters(plan)
+    if _run_cycle(target) != 0:
+        return ScenarioResult("two_cycle_feedback_terminates", False, "cycle1 rc!=0")
+    if _run_cycle(target) != 0:
+        return ScenarioResult("two_cycle_feedback_terminates", False, "cycle2 rc!=0")
+    s2 = _read_session(target)
+    if s2.get("state") != "completed":
+        return ScenarioResult(
+            "two_cycle_feedback_terminates", False,
+            f"cycle2 state={s2.get('state')} != 'completed'",
+        )
+    # Cycle 2 의 planner invocation 에서 previous_reviews 키가 context 에 있는지 검증.
+    planner_invocations = adapters["planner"].invocations
+    if len(planner_invocations) != 2:
+        return ScenarioResult(
+            "two_cycle_feedback_terminates", False,
+            f"planner invoked {len(planner_invocations)} times, expected 2 (one per cycle)",
+        )
+    cycle2_planner_ctx = planner_invocations[-1].context or {}
+    previous_reviews = cycle2_planner_ctx.get("previous_reviews")
+    if not isinstance(previous_reviews, dict) or not previous_reviews:
+        return ScenarioResult(
+            "two_cycle_feedback_terminates", False,
+            f"cycle2 planner.context.previous_reviews missing or empty: {previous_reviews!r}",
+        )
+    # orchestrator 결과가 흘러갔는지 — 자율 피드백 루프의 핵심 채널.
+    if "orchestrator" not in previous_reviews:
+        return ScenarioResult(
+            "two_cycle_feedback_terminates", False,
+            f"cycle2 planner.previous_reviews missing 'orchestrator' channel: keys={list(previous_reviews)}",
+        )
+    return ScenarioResult(
+        "two_cycle_feedback_terminates", True,
+        "cycle1 verdict→cycle2 planner.previous_reviews 로 흐름 + cycle2 complete_cycle 종단",
+    )
+
+
+def _scenario_user_stop_blocks_cycle(sandbox: Path) -> ScenarioResult:
+    """사용자 stop 훅: `.orch/STOP` 파일이 발화 시작 전에 발견되면 cycle 정상 BLOCKED.
+    STOP 파일은 `.orch/runtime/stops/` 로 archive 되어 다음 cycle 에 잔류하지 않음.
+    user_stop_detected runtime event 도 emit.
+    """
+    target = sandbox / "user-stop"
+    _init_project(target)
+    # planner 발화 전에 STOP 신호 박아 두기. 첫 발화도 들어가기 전에 잡힘.
+    stop_path = target / ".orch" / "STOP"
+    stop_path.write_text("smoke test stop reason", encoding="utf-8")
+
+    plan = [{"functional": 0.95, "human": 0.95, "result": "pass"}]
+    _install_scripted_adapters(plan)
+    rc = _run_cycle(target)
+    if rc != 2:
+        return ScenarioResult("user_stop_blocks_cycle", False, f"expected rc=2, got rc={rc}")
+    session = _read_session(target)
+    if session.get("state") != "blocked":
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False,
+            f"state={session.get('state')!r} != 'blocked'",
+        )
+    if session.get("last_decision") != "user_stop":
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False,
+            f"last_decision={session.get('last_decision')!r} != 'user_stop'",
+        )
+    if "smoke test stop reason" not in str(session.get("last_decision_reason") or ""):
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False,
+            f"last_decision_reason missing user reason: {session.get('last_decision_reason')!r}",
+        )
+    if stop_path.exists():
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False,
+            "STOP file should be archived (moved out of .orch/STOP)",
+        )
+    archive_dir = target / ".orch" / "runtime" / "stops"
+    if not archive_dir.exists() or not list(archive_dir.glob("stop_*.txt")):
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False,
+            "archive .orch/runtime/stops/stop_*.txt missing",
+        )
+    events_path = target / ".orch" / "runtime" / "events.jsonl"
+    if not events_path.exists():
+        return ScenarioResult("user_stop_blocks_cycle", False, "events.jsonl missing")
+    saw_event = False
+    for raw in events_path.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        evt = json.loads(raw)
+        if evt.get("event") == "user_stop_detected":
+            saw_event = True
+            break
+    if not saw_event:
+        return ScenarioResult(
+            "user_stop_blocks_cycle", False, "user_stop_detected event not emitted"
+        )
+    return ScenarioResult(
+        "user_stop_blocks_cycle", True,
+        ".orch/STOP detected → cycle BLOCKED + reason 보존 + archive + event emit",
+    )
+
+
 def _scenario_unity_batchmode_dry_run(sandbox: Path) -> ScenarioResult:
     """옵션 C 다음 stride: unity_batchmode runner 가 Unity 미설치 환경 (UNITY_EDITOR_PATH
     미설정) 에서 dry-run mode 로 진입해 인자만 빌드하고 fake pass 결과를 돌려준다.
@@ -1853,6 +1978,8 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "runner_routes_external_result": _scenario_runner_routes_external_result,
     "runner_nonzero_exit_routes_normally": _scenario_runner_nonzero_exit_routes_normally,
     "unity_batchmode_dry_run": _scenario_unity_batchmode_dry_run,
+    "user_stop_blocks_cycle": _scenario_user_stop_blocks_cycle,
+    "two_cycle_feedback_terminates": _scenario_two_cycle_feedback_terminates,
 }
 
 

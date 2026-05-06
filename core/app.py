@@ -371,6 +371,32 @@ def run_cycle(args: argparse.Namespace) -> int:
     step_no = 0
     while True:
         step_no += 1
+        # User stop hook (D10 안전선의 동반 — 사용자 stop 이 최종 방어선).
+        # 발화 시작 전에 .orch/STOP 파일 체크. 발견 시 archive 후 BLOCKED state 로 정상
+        # tear-down. 다음 cycle 에 잔류해서 무한 stop loop 가 되지 않도록 즉시 archive.
+        stop_signal = _check_user_stop(orch_root)
+        if stop_signal is not None:
+            stop_reason = stop_signal[:400]
+            runtime.write_json(
+                "runtime/session.json",
+                {
+                    **runtime.read_json("runtime/session.json", {}),
+                    "state": EngineState.BLOCKED.value,
+                    "active_role": None,
+                    "cycle": cycle_index,
+                    "last_decision": "user_stop",
+                    "last_decision_reason": stop_reason,
+                },
+            )
+            runtime.append_event(
+                "user_stop_detected",
+                {"cycle": cycle_index, "step": step_no, "reason": stop_reason},
+            )
+            print(
+                f"사이클 {cycle_index} 중단: 사용자 stop 요청 (.orch/STOP) "
+                f"step={step_no} reason={stop_reason[:120]}"
+            )
+            return 2
         if step_no > max_utterances:
             runtime.write_json(
                 "runtime/session.json",
@@ -797,6 +823,40 @@ def _read_yaml(path: Path) -> dict:
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _check_user_stop(orch_root: Path) -> str | None:
+    """발화 사이마다 호출되는 사용자 stop 감지.
+
+    `.orch/STOP` 파일이 존재하면 그 내용을 reason 으로 반환하고 파일을
+    `.orch/runtime/stops/stop_<unix_ts>.txt` 로 archive (replace 실패 시 unlink).
+    내용이 비어 있으면 기본 reason 사용. 파일이 없으면 None.
+
+    archive 는 다음 cycle 에 STOP 이 잔류해서 무한 stop loop 가 되지 않게
+    하기 위함. ignore_errors 패턴이 아니라 명시적 archive 실패 시 unlink
+    fallback — 파일이 어떤 형태로든 사라져야 다음 cycle 진입 가능.
+    """
+    stop_path = orch_root / "STOP"
+    if not stop_path.exists():
+        return None
+    try:
+        text = stop_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        text = ""
+    reason = text or "user requested stop"
+    archive_dir = orch_root / "runtime" / "stops"
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"stop_{int(time.time())}.txt"
+        stop_path.replace(archive_path)
+    except OSError:
+        try:
+            stop_path.unlink()
+        except OSError:
+            # 마지막 fallback — 파일을 못 지우면 다음 cycle 도 stop 으로 잡힘.
+            # 사용자가 직접 정리해야 한다는 신호로 reason 에 표식.
+            reason = f"{reason} [archive failed]"
+    return reason
 
 
 def _build_adapter(adapter_name: str) -> BaseAdapter:
