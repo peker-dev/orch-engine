@@ -23,6 +23,8 @@ Scenarios (post Phase 2 P1-5):
     - consecutive_disagrees_warns_but_continues : D10 P0-R 3 — N회 연속 disagree 경고
     - orchestrator_disagree_empty_next_blocks_cycle : disagree + next_speaker 빈값 가드
     - custom_verifier_routing                : P0-R 2 (D9/D11) — 도메인 roles.yaml 의 custom verifier 라우팅
+    - runner_routes_external_result          : 옵션 C 1차 — echo_runner 가 BaseRunnerAdapter 경로로 utterance 합성
+    - runner_nonzero_exit_routes_normally    : 옵션 C 1차 — runner 실패 시 엔진 가로채지 않고 cycle 진행
 
 Run:
     python -m tools.cycle_e2e_smoke
@@ -1044,12 +1046,20 @@ def _scenario_orchestrator_disagree_resumes_cycle(sandbox: Path) -> ScenarioResu
     )
 
 
-def _install_role_adapters(role_adapters: dict[str, ScriptedAdapter]) -> None:
+def _install_role_adapters(
+    role_adapters: dict[str, ScriptedAdapter],
+    *,
+    fallback_build_adapter: Callable[[str], Any] | None = None,
+) -> None:
     """`_install_scripted_adapters` 와 같은 inspect-based 라우팅을 임의 role_adapters
     딕셔너리에 적용. StatefulOrchestratorAdapter 등 시나리오 전용 adapter 를 섞을 때 사용.
+
+    fallback_build_adapter 가 주어지면, _run_verifier 가 role_adapters 에 없는 역할을
+    호출할 때 그 함수로 위임 — 옵션 C 의 echo_runner 같이 진짜 entry point 를 통해
+    돌려야 하는 runner 용. None 이면 기존처럼 RuntimeError.
     """
 
-    def fake_build_adapter(_name: str, *, role_adapters=role_adapters):
+    def fake_build_adapter(_name: str, *, role_adapters=role_adapters, fallback=fallback_build_adapter):
         import inspect
 
         frame = inspect.currentframe()
@@ -1068,6 +1078,8 @@ def _install_role_adapters(role_adapters: dict[str, ScriptedAdapter]) -> None:
                     role_arg = caller.f_locals.get("role")
                     if role_arg in role_adapters:
                         return role_adapters[role_arg]
+                    if fallback is not None:
+                        return fallback(_name)
         finally:
             del frame
         raise RuntimeError("install_role_adapters could not resolve target role")
@@ -1499,6 +1511,223 @@ def _scenario_custom_verifier_routing(sandbox: Path) -> ScenarioResult:
         shutil.rmtree(test_domain_dir, ignore_errors=True)
 
 
+def _scenario_runner_routes_external_result(sandbox: Path) -> ScenarioResult:
+    """옵션 C 1차 stride: domain roles.yaml 의 verifier_echo (default_provider=echo_runner)
+    가 BaseRunnerAdapter 경로로 합류해서 utterance 를 자동 합성, reviews/<role>_latest.json
+    이 작성되고 cycle 이 정상 완료된다. echo_runner 는 실제 코드를 그대로 돌린다.
+    """
+    from adapters import base as _ab
+    from uuid import uuid4 as _uuid4
+
+    test_domain_id = f"__test_runner_routing_{_uuid4().hex[:8]}__"
+    test_domain_dir = Path(_ab.ENGINE_ROOT) / "domains" / test_domain_id
+    test_domain_dir.mkdir(parents=True, exist_ok=True)
+    (test_domain_dir / "roles.yaml").write_text(
+        "roles:\n"
+        "  - id: verifier_echo\n"
+        "    family: verifier\n"
+        "    display: 에코 검수자\n"
+        "    default_provider: echo_runner\n"
+        "    next_speaker_default: verifier_human\n",
+        encoding="utf-8",
+    )
+    target = sandbox / "runner-echo"
+    original_build_adapter = app._build_adapter
+    try:
+        _init_project(target)
+        session_path = target / ".orch" / "runtime" / "session.json"
+        session_data = json.loads(session_path.read_text(encoding="utf-8"))
+        session_data["domain"] = test_domain_id
+        session_path.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        roles_path = target / ".orch" / "config" / "roles.yaml"
+        roles_data = json.loads(roles_path.read_text(encoding="utf-8"))
+        roles_data.setdefault("roles", {})["verifier_echo"] = "echo_runner"
+        roles_path.write_text(
+            json.dumps(roles_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        plan = [
+            {
+                "functional": 0.95,
+                "human": 0.95,
+                "result": "pass",
+                "utterances": {
+                    "planner": {"next_speaker": "builder"},
+                    "builder": {"next_speaker": "verifier_echo"},
+                    "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+                    "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
+                },
+            }
+        ]
+        role_adapters: dict[str, ScriptedAdapter] = {
+            "planner": ScriptedAdapter("planner", plan),
+            "builder": ScriptedAdapter("builder", plan),
+            "verifier_human": ScriptedAdapter("verifier_human", plan),
+            "orchestrator": ScriptedAdapter("orchestrator", plan),
+        }
+        _install_role_adapters(role_adapters, fallback_build_adapter=original_build_adapter)
+
+        rc = _run_cycle(target)
+        if rc != 0:
+            return ScenarioResult("runner_routes_external_result", False, f"run_cycle rc={rc}")
+        review_path = target / ".orch" / "reviews" / "verifier_echo_latest.json"
+        if not review_path.exists():
+            return ScenarioResult(
+                "runner_routes_external_result", False,
+                "reviews/verifier_echo_latest.json was not written",
+            )
+        review_data = json.loads(review_path.read_text(encoding="utf-8"))
+        if review_data.get("role") != "verifier_echo":
+            return ScenarioResult(
+                "runner_routes_external_result", False,
+                f"review.role={review_data.get('role')!r} != 'verifier_echo'",
+            )
+        if review_data.get("result") != "pass":
+            return ScenarioResult(
+                "runner_routes_external_result", False,
+                f"review.result={review_data.get('result')!r} != 'pass'",
+            )
+        session = _read_session(target)
+        if session.get("state") != "completed":
+            return ScenarioResult(
+                "runner_routes_external_result", False,
+                f"final state={session.get('state')!r} != 'completed'",
+            )
+        return ScenarioResult(
+            "runner_routes_external_result", True,
+            "echo_runner 가 BaseRunnerAdapter 경로로 utterance 합성 + reviews 작성 + cycle closure",
+        )
+    finally:
+        shutil.rmtree(test_domain_dir, ignore_errors=True)
+
+
+def _scenario_runner_nonzero_exit_routes_normally(sandbox: Path) -> ScenarioResult:
+    """옵션 C 1차 stride: runner 가 exit_code=1 을 돌려주면 utterance.result='fail' 로
+    합성되지만 엔진은 가로채지 않고 정상 흐름 진행 (orchestrator 가 needs_iteration 결정).
+    자율 피드백 루프 원칙 — runner 결과 자체로 cycle 을 강제 BLOCKED 하지 않는다.
+    """
+    from adapters import base as _ab
+    from uuid import uuid4 as _uuid4
+
+    test_domain_id = f"__test_runner_fail_{_uuid4().hex[:8]}__"
+    test_domain_dir = Path(_ab.ENGINE_ROOT) / "domains" / test_domain_id
+    test_domain_dir.mkdir(parents=True, exist_ok=True)
+    (test_domain_dir / "roles.yaml").write_text(
+        "roles:\n"
+        "  - id: verifier_echo\n"
+        "    family: verifier\n"
+        "    default_provider: echo_runner\n"
+        "    next_speaker_default: verifier_human\n",
+        encoding="utf-8",
+    )
+    target = sandbox / "runner-echo-fail"
+    original_build_adapter = app._build_adapter
+    try:
+        _init_project(target)
+        session_path = target / ".orch" / "runtime" / "session.json"
+        session_data = json.loads(session_path.read_text(encoding="utf-8"))
+        session_data["domain"] = test_domain_id
+        session_path.write_text(
+            json.dumps(session_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        roles_path = target / ".orch" / "config" / "roles.yaml"
+        roles_data = json.loads(roles_path.read_text(encoding="utf-8"))
+        roles_data.setdefault("roles", {})["verifier_echo"] = "echo_runner"
+        roles_path.write_text(
+            json.dumps(roles_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        # 의도적으로 exit_code=1. echo_runner 는 invocation.context["echo"] 로
+        # override 를 받는데, dispatch loop 의 _run_verifier 가 context 에 task 와
+        # cycle 만 넣으므로, project goal 에 marker 를 박고 runner 안에서 인식하는 방법은
+        # 적합하지 않다. 대신 echo_runner 를 한 번 더 monkey-patch 해서 exit_code=1 강제.
+        from runners import echo_runner as _er
+
+        original_run = _er.RUNNER.run
+
+        def failing_run(invocation):
+            from runners.base import RunnerResult
+            return RunnerResult(
+                exit_code=1,
+                summary="echo_runner intentional fail",
+                stderr_excerpt="simulated failure for smoke test",
+                findings=["echo_runner returned non-zero exit code"],
+            )
+
+        _er.RUNNER.run = failing_run  # type: ignore[method-assign]
+
+        plan = [
+            {
+                "functional": 0.5,
+                "human": 0.5,
+                "result": "needs_iteration",
+                "utterances": {
+                    "planner": {"next_speaker": "builder"},
+                    "builder": {"next_speaker": "verifier_echo"},
+                    # verifier_echo 는 runner 가 처리, next_speaker_default=verifier_human 따라감
+                    "verifier_human": {"declare_done": True, "next_speaker": "orchestrator"},
+                    # orchestrator 는 ScriptedAdapter 가 derived 매핑으로 needs_iteration→iterating.
+                    # 사이클은 종료되되 BLOCKED 가 아니라 ITERATING.
+                    "orchestrator": {"arbitration": "agree", "next_speaker": "__end__"},
+                },
+            }
+        ]
+        role_adapters: dict[str, ScriptedAdapter] = {
+            "planner": ScriptedAdapter("planner", plan),
+            "builder": ScriptedAdapter("builder", plan),
+            "verifier_human": ScriptedAdapter("verifier_human", plan),
+            "orchestrator": ScriptedAdapter("orchestrator", plan),
+        }
+        _install_role_adapters(role_adapters, fallback_build_adapter=original_build_adapter)
+
+        try:
+            rc = _run_cycle(target)
+        finally:
+            _er.RUNNER.run = original_run  # type: ignore[method-assign]
+
+        if rc != 0:
+            return ScenarioResult(
+                "runner_nonzero_exit_routes_normally", False,
+                f"expected rc=0 (cycle continues despite runner fail), got rc={rc}",
+            )
+        review_path = target / ".orch" / "reviews" / "verifier_echo_latest.json"
+        if not review_path.exists():
+            return ScenarioResult(
+                "runner_nonzero_exit_routes_normally", False,
+                "reviews/verifier_echo_latest.json missing",
+            )
+        review_data = json.loads(review_path.read_text(encoding="utf-8"))
+        if review_data.get("result") != "fail":
+            return ScenarioResult(
+                "runner_nonzero_exit_routes_normally", False,
+                f"review.result={review_data.get('result')!r} != 'fail'",
+            )
+        if not review_data.get("blocking_issues"):
+            return ScenarioResult(
+                "runner_nonzero_exit_routes_normally", False,
+                "blocking_issues missing despite non-zero exit",
+            )
+        session = _read_session(target)
+        # ScriptedAdapter orchestrator 가 needs_iteration→iterating 으로 매핑.
+        # cycle 정상 closure 이므로 state 는 iterating.
+        if session.get("state") != "iterating":
+            return ScenarioResult(
+                "runner_nonzero_exit_routes_normally", False,
+                f"final state={session.get('state')!r} != 'iterating' (engine should not block)",
+            )
+        return ScenarioResult(
+            "runner_nonzero_exit_routes_normally", True,
+            "runner exit_code=1 → result=fail 합성, 엔진은 가로채지 않고 cycle 정상 진행",
+        )
+    finally:
+        shutil.rmtree(test_domain_dir, ignore_errors=True)
+
+
 SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "complete_on_first_cycle": _scenario_complete_on_first_cycle,
     "needs_iteration_then_success": _scenario_needs_iteration_then_success,
@@ -1514,6 +1743,8 @@ SCENARIOS: dict[str, Callable[[Path], ScenarioResult]] = {
     "consecutive_disagrees_warns_but_continues": _scenario_consecutive_disagrees_warns_but_continues,
     "orchestrator_disagree_empty_next_blocks_cycle": _scenario_orchestrator_disagree_empty_next_blocks_cycle,
     "custom_verifier_routing": _scenario_custom_verifier_routing,
+    "runner_routes_external_result": _scenario_runner_routes_external_result,
+    "runner_nonzero_exit_routes_normally": _scenario_runner_nonzero_exit_routes_normally,
 }
 
 

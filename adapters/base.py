@@ -586,12 +586,16 @@ def _load_domain_custom_roles(working_directory: str | Path) -> list[dict[str, A
         if family not in SUPPORTED_CUSTOM_FAMILIES:
             continue
         seen_ids.add(role_id)
+        next_speaker_default = str(
+            entry.get("next_speaker_default") or ""
+        ).strip() or None
         cleaned.append(
             {
                 "id": role_id,
                 "family": family,
                 "display": str(entry.get("display") or role_id),
                 "default_provider": str(entry.get("default_provider") or "").strip() or None,
+                "next_speaker_default": next_speaker_default,
             }
         )
     _CUSTOM_ROLES_CACHE[cache_key] = cleaned

@@ -815,7 +815,42 @@ def _build_adapter(adapter_name: str) -> BaseAdapter:
             "`workflow.yaml`의 `human_review_mode: handoff`와 함께 사용하거나, "
             "`roles.yaml`의 `verifier_human`을 `codex_cli`로 바꾸세요."
         )
-    raise ValueError(f"Unsupported adapter: {adapter_name}")
+    # 옵션 C 1차 stride (2026-05-06): LLM CLI 라벨이 아닌 이름은 runners.<name>
+    # 모듈로 동적 import 시도. 모듈은 `RUNNER` 라는 이름으로 BaseRunnerAdapter
+    # 인스턴스 하나를 export 해야 한다. import 실패는 명백한 도메인 설정 오타이거나
+    # 미구현 runner 이므로 AdapterFatalError 로 즉시 중단.
+    return _build_runner_adapter(adapter_name)
+
+
+def _build_runner_adapter(adapter_name: str) -> BaseAdapter:
+    import importlib
+
+    from runners.base import BaseRunnerAdapter, RESERVED_LLM_PROVIDERS
+
+    if adapter_name in RESERVED_LLM_PROVIDERS:
+        # _build_adapter 의 위 분기가 모두 처리해야 했다는 뜻 — 방어선.
+        raise ValueError(
+            f"Reserved LLM provider {adapter_name!r} routed to runner loader; "
+            f"check _build_adapter dispatch."
+        )
+    try:
+        module = importlib.import_module(f"runners.{adapter_name}")
+    except ImportError as exc:
+        from adapters.base import AdapterFatalError
+
+        raise AdapterFatalError(
+            f"Unknown adapter / runner {adapter_name!r}: failed to import "
+            f"runners.{adapter_name} ({type(exc).__name__}: {exc})"
+        ) from exc
+    runner = getattr(module, "RUNNER", None)
+    if not isinstance(runner, BaseRunnerAdapter):
+        from adapters.base import AdapterFatalError
+
+        raise AdapterFatalError(
+            f"runners.{adapter_name} must export a module-level `RUNNER` "
+            f"instance of BaseRunnerAdapter (got {type(runner).__name__})."
+        )
+    return runner
 
 
 def _run_token_preflight(
