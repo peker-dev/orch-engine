@@ -103,14 +103,29 @@ class ClaudeCliAdapter:
             cmd += ["--model", self.model]
         cmd.append(user_prompt(role, context))
 
-        completed = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-            encoding="utf-8",
-        )
+        # timeout 1회 재시도. quota / 비-timeout 실패는 그대로 raise.
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                completed = subprocess.run(
+                    cmd,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    encoding="utf-8",
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if attempts >= 2:
+                    raise
+                print(
+                    f"[claude_cli retry] role={role} attempt=1 "
+                    f"timeout={self.timeout}s — retrying once",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if completed.returncode != 0:
             raise RuntimeError(
                 f"claude CLI failed rc={completed.returncode}: "
