@@ -52,12 +52,16 @@ python -m core.app run  --target <target_path> --max-cycles 2
 python -m core.app init --target <target_path> --goal "..." --profile claude
 python -m core.app init --target <target_path> --goal "..." --profile codex
 
+# 빌더 모델만 약화해서 비용 절감 (로직은 동일, 다른 역할은 그대로)
+python -m core.app init --target <target_path> --goal "..." --profile mixed --builder-model haiku
+
 # smoke (자동 개선 루프 + STOP, 실제 LLM 호출 없음)
 python -m tools.mvp_smoke
 ```
 
 역할별 어댑터 매핑은 init 후 `<target>/.orch/config/roles.json` 의 `adapters`
-필드에서 자유롭게 바꿀 수 있습니다 (고정 룰 아님).
+필드에서 자유롭게 바꿀 수 있습니다 (고정 룰 아님). 모델은 `models` 필드에 역할별로
+저장됩니다 (`--builder-model` 은 그중 `builder` 만 채우는 단축 옵션).
 
 `.orch/STOP` 파일을 만들면 다음 역할 실행 전에 멈춥니다.
 

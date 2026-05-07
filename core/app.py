@@ -95,14 +95,20 @@ def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.target).resolve()
     base = store.init_orch(target, goal=args.goal)
 
-    if args.profile != "scripted":
+    if args.profile != "scripted" or args.builder_model:
         roles_path = store.paths(target)["roles"]
         roles = store.load_json(roles_path)
-        roles["adapters"] = dict(PROFILES[args.profile])
+        if args.profile != "scripted":
+            roles["adapters"] = dict(PROFILES[args.profile])
+        if args.builder_model:
+            roles.setdefault("models", {})["builder"] = args.builder_model
         store.save_json(roles_path, roles)
 
     print(f"initialised {base} (profile={args.profile})")
-    print(json.dumps({"reason": "initialised", "orch": str(base), "profile": args.profile}, ensure_ascii=False))
+    payload = {"reason": "initialised", "orch": str(base), "profile": args.profile}
+    if args.builder_model:
+        payload["builder_model"] = args.builder_model
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
@@ -129,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="scripted",
         choices=sorted(PROFILES.keys()),
         help="initial role->adapter mapping (default: scripted)",
+    )
+    p_init.add_argument(
+        "--builder-model",
+        default=None,
+        help="model name for the builder role (e.g. haiku). saved into "
+             ".orch/config/roles.json under models.builder; other roles untouched.",
     )
     p_init.set_defaults(func=cmd_init)
 
