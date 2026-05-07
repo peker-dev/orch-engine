@@ -70,4 +70,4 @@ python -m tools.mvp_smoke
 - [x] ScriptedAdapter + 2 사이클 자동 개선 smoke
 - [x] STOP 감지 smoke
 - [x] `claude_cli` / `codex_cli` 어댑터 + 역할별 매핑 + `--profile mixed`
-- [ ] live target 폴더에서 실측 smoke (실제 LLM 호출, 박제관 트리거 대기)
+- [x] live target 폴더에서 mixed 실측 smoke (live04: cycle 1 needs_iteration → cycle 2 pass)
