@@ -70,7 +70,7 @@ def _make_adapter(name: str, model: str | None = None, target: str | None = None
     if name == "codex_cli":
         from adapters.codex_cli import CodexCliAdapter
 
-        return CodexCliAdapter(model=model)
+        return CodexCliAdapter(model=model, target=target)
     raise SystemExit(f"unknown adapter: {name!r}")
 
 
