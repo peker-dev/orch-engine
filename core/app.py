@@ -58,7 +58,7 @@ PROFILES: dict[str, dict[str, str]] = {
 }
 
 
-def _make_adapter(name: str, model: str | None = None) -> Adapter:
+def _make_adapter(name: str, model: str | None = None, target: str | None = None) -> Adapter:
     if name == "scripted":
         from adapters.scripted import ScriptedAdapter
 
@@ -66,7 +66,7 @@ def _make_adapter(name: str, model: str | None = None) -> Adapter:
     if name == "claude_cli":
         from adapters.claude_cli import ClaudeCliAdapter
 
-        return ClaudeCliAdapter(model=model)
+        return ClaudeCliAdapter(model=model, target=target)
     if name == "codex_cli":
         from adapters.codex_cli import CodexCliAdapter
 
@@ -86,7 +86,7 @@ def _build_adapters(target: Path) -> dict[str, Adapter]:
         model = models.get(role)
         key = (name, model)
         if key not in cache:
-            cache[key] = _make_adapter(name, model)
+            cache[key] = _make_adapter(name, model, target=str(target))
         out[role] = cache[key]
     return out
 
