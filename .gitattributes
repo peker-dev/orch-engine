@@ -1,0 +1,7 @@
+# Let git auto-detect text vs binary and normalize line endings on checkin.
+# Working tree line endings stay OS-native (no eol=lf forcing).
+* text=auto
+
+# Explicit text types in this repo
+*.py text
+*.md text
