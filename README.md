@@ -36,9 +36,9 @@ reviews / artifacts).
 # 메뉴 진입 (init / run / 종료)
 python -m core.launcher
 
-# CLI 직접 — scripted (기본): 가짜 응답 어댑터로 루프만 검증
+# CLI 직접 — scripted (기본): 가짜 응답 어댑터로 루프만 검증 (cycle 2 에서 pass)
 python -m core.app init --target <target_path> --goal "<목표 문장>"
-python -m core.app run  --target <target_path> --max-cycles 1
+python -m core.app run  --target <target_path> --max-cycles 2
 
 # mixed (권장): planner/orchestrator=codex_cli, builder/verifier=claude_cli
 python -m core.app init --target <target_path> --goal "<목표 문장>" --profile mixed
@@ -55,8 +55,9 @@ python -m core.app init --target <target_path> --goal "..." --profile mixed --bu
 python -m tools.mvp_smoke
 ```
 
-`--max-cycles` 는 보통 **1** 로 충분합니다 (현재 어댑터·도구 정책에서 cycle 1
-통과가 정상). 한 번에 끝나지 않은 경우만 2 이상으로 올립니다.
+`--max-cycles` 는 live 어댑터 (mixed / claude / codex) 에서는 보통 **1** 로
+충분합니다 (현재 어댑터·도구 정책에서 cycle 1 통과가 정상). scripted 는 2 사이클
+데모 어댑터라 **2** 가 필요합니다. 한 번에 끝나지 않은 경우만 더 올립니다.
 
 역할별 어댑터 매핑은 init 후 `<target>/.orch/config/roles.json` 의 `adapters`
 필드에서 자유롭게 바꿀 수 있습니다 (고정 룰 아님). 모델은 `models` 필드에 역할별로
