@@ -63,6 +63,8 @@ python -m tools.mvp_smoke
 필드에서 자유롭게 바꿀 수 있습니다 (고정 룰 아님). 모델은 `models` 필드에 역할별로
 저장됩니다 (`--builder-model` 은 그중 `builder` 만 채우는 단축 옵션).
 
+`run` 종료 시 마지막 줄에 결과 위치가 절대경로로 출력됩니다 (`artifacts: <target>/.orch/artifacts`).
+
 `.orch/STOP` 파일을 만들면 다음 역할 실행 전에 멈춥니다.
 
 ---

@@ -120,6 +120,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     adapters = _build_adapters(target)
     result = loop.run(str(target), adapters, max_cycles=args.max_cycles)
     print(json.dumps(result, ensure_ascii=False))
+    print(f"artifacts: {store.orch_dir(target) / 'artifacts'}")
     return 0
 
 
