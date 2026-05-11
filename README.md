@@ -55,6 +55,8 @@ python -m core.app init --target <target_path> --goal "..." --profile mixed --bu
 python -m tools.mvp_smoke
 ```
 
+위 명령은 **PowerShell 기준**으로 검증되었습니다. bash / cmd / WSL 에서는 따옴표·경로 인용 차이로 막힐 수 있으니, 그때는 PowerShell 사용을 권장합니다.
+
 `--max-cycles` 는 live 어댑터 (mixed / claude / codex) 에서는 보통 **1** 로
 충분합니다 (현재 어댑터·도구 정책에서 cycle 1 통과가 정상). scripted 는 2 사이클
 데모 어댑터라 **2** 가 필요합니다. 한 번에 끝나지 않은 경우만 더 올립니다.
