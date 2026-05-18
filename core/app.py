@@ -94,16 +94,32 @@ def _build_adapters(target: Path) -> dict[str, Adapter]:
 
 def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.target).resolve()
-    base = store.init_orch(target, goal=args.goal)
 
-    if args.profile != "scripted" or args.builder_model:
-        roles_path = store.paths(target)["roles"]
-        roles = store.load_json(roles_path)
-        if args.profile != "scripted":
-            roles["adapters"] = dict(PROFILES[args.profile])
-        if args.builder_model:
-            roles.setdefault("models", {})["builder"] = args.builder_model
-        store.save_json(roles_path, roles)
+    try:
+        base = store.init_orch(target, goal=args.goal)
+
+        if args.profile != "scripted" or args.builder_model:
+            roles_path = store.paths(target)["roles"]
+            roles = store.load_json(roles_path)
+            if args.profile != "scripted":
+                roles["adapters"] = dict(PROFILES[args.profile])
+            if args.builder_model:
+                roles.setdefault("models", {})["builder"] = args.builder_model
+            store.save_json(roles_path, roles)
+    except ValueError as e:
+        print(f"실패: 이미 초기화된 폴더입니다 — {e}", file=sys.stderr)
+        print(
+            "다음 조치: 기존 .orch/ 를 직접 삭제한 뒤 init 을 다시 실행하세요.",
+            file=sys.stderr,
+        )
+        return 2
+    except PermissionError as e:
+        print(f"실패: 대상 폴더 접근 권한이 없습니다 — {e}", file=sys.stderr)
+        print(
+            "다음 조치: 폴더 권한을 확인하거나 다른 경로로 init 을 다시 실행하세요.",
+            file=sys.stderr,
+        )
+        return 2
 
     print(f"initialised {base} (profile={args.profile})")
     payload = {"reason": "initialised", "orch": str(base), "profile": args.profile}
