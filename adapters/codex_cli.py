@@ -142,9 +142,9 @@ class CodexCliAdapter:
                 pass
 
         if completed.returncode != 0:
+            detail = completed.stderr.strip()[:500] or completed.stdout.strip()[:500]
             raise RuntimeError(
-                f"codex CLI failed rc={completed.returncode}: "
-                f"{completed.stderr.strip()[:500] or completed.stdout.strip()[:500]}"
+                f"codex_cli role={role} subprocess returned rc={completed.returncode}: {detail}"
             )
 
         usage = _extract_usage(completed.stdout, completed.stderr)
@@ -157,13 +157,16 @@ class CodexCliAdapter:
                 file=sys.stderr,
                 flush=True,
             )
-        return _parse_stdout(completed.stdout)
+        try:
+            return _parse_stdout(completed.stdout)
+        except RuntimeError as e:
+            raise RuntimeError(f"codex_cli role={role} {e}") from e
 
 
 def _parse_stdout(stdout: str) -> dict[str, Any]:
     text = stdout.strip()
     if not text:
-        raise RuntimeError("empty stdout from codex CLI")
+        raise RuntimeError("empty stdout")
 
     # 1) stdout 전체가 단일 JSON 인 경우
     try:
@@ -181,7 +184,7 @@ def _parse_stdout(stdout: str) -> dict[str, Any]:
     # 3) 첫 번째 JSON 객체 fallback
     match = _JSON_OBJ_RE.search(text)
     if not match:
-        raise RuntimeError(f"no JSON object in codex stdout: {text[-400:]}")
+        raise RuntimeError(f"no JSON object in stdout: {text[-400:]}")
     return json.loads(match.group(0))
 
 

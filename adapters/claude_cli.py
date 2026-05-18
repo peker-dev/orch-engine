@@ -127,9 +127,9 @@ class ClaudeCliAdapter:
                     flush=True,
                 )
         if completed.returncode != 0:
+            detail = completed.stderr.strip()[:500] or completed.stdout.strip()[:500]
             raise RuntimeError(
-                f"claude CLI failed rc={completed.returncode}: "
-                f"{completed.stderr.strip()[:500] or completed.stdout.strip()[:500]}"
+                f"claude_cli role={role} subprocess returned rc={completed.returncode}: {detail}"
             )
         usage = _extract_usage(completed.stdout)
         self.last_usage = usage
@@ -145,13 +145,16 @@ class ClaudeCliAdapter:
                 file=sys.stderr,
                 flush=True,
             )
-        return _parse_stdout(completed.stdout)
+        try:
+            return _parse_stdout(completed.stdout)
+        except RuntimeError as e:
+            raise RuntimeError(f"claude_cli role={role} {e}") from e
 
 
 def _parse_stdout(stdout: str) -> dict[str, Any]:
     text = stdout.strip()
     if not text:
-        raise RuntimeError("empty stdout from claude CLI")
+        raise RuntimeError("empty stdout")
     try:
         wrapper = json.loads(text)
     except json.JSONDecodeError:
@@ -159,7 +162,7 @@ def _parse_stdout(stdout: str) -> dict[str, Any]:
 
     if isinstance(wrapper, dict):
         if wrapper.get("is_error"):
-            raise RuntimeError(f"claude returned error: {wrapper.get('result') or wrapper}")
+            raise RuntimeError(f"CLI returned is_error: {wrapper.get('result') or wrapper}")
 
         # schema-constrained 응답은 `structured_output` 필드에 들어옴 (실측 기준)
         structured = wrapper.get("structured_output")
@@ -179,7 +182,7 @@ def _parse_stdout(stdout: str) -> dict[str, Any]:
         if "role" in wrapper or {"verdict", "decision", "title", "summary"} & wrapper.keys():
             return wrapper
 
-        raise RuntimeError(f"no structured_output in claude wrapper: keys={list(wrapper.keys())}")
+        raise RuntimeError(f"missing structured_output: keys={list(wrapper.keys())}")
 
     return _extract_object(text)
 
@@ -216,5 +219,5 @@ def _extract_object(text: str) -> dict[str, Any]:
         pass
     match = _JSON_OBJ_RE.search(text)
     if not match:
-        raise RuntimeError(f"no JSON object in claude stdout: {text[:300]}")
+        raise RuntimeError(f"no JSON object in stdout: {text[:300]}")
     return json.loads(match.group(0))
