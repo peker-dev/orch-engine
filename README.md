@@ -67,6 +67,10 @@ python -m tools.mvp_smoke
 
 `run` 종료 시 마지막 줄에 결과 위치가 절대경로로 출력됩니다 (`artifacts: <target>/.orch/artifacts`).
 
+`run` 이 실패하면 stderr 에 `실패: ...` 1줄 + `다음 조치: ...` 1줄을 출력하고 exit
+code `2` 로 종료합니다. 어댑터 CLI 미설치 / timeout 재시도까지 실패 / 어댑터 호출 오류
+3종이 같은 포맷입니다.
+
 `.orch/STOP` 파일을 만들면 다음 역할 실행 전에 멈춥니다.
 
 ---

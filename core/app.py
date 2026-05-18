@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -117,8 +118,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not store.orch_dir(target).exists():
         raise SystemExit(f"no .orch found under {target}. run init first.")
 
-    adapters = _build_adapters(target)
-    result = loop.run(str(target), adapters, max_cycles=args.max_cycles)
+    try:
+        adapters = _build_adapters(target)
+        result = loop.run(str(target), adapters, max_cycles=args.max_cycles)
+    except FileNotFoundError as e:
+        print(f"실패: 어댑터 CLI 를 찾을 수 없습니다 — {e}", file=sys.stderr)
+        print("다음 조치: 해당 CLI 를 설치하거나 PATH 를 확인한 뒤 다시 실행하세요.", file=sys.stderr)
+        return 2
+    except subprocess.TimeoutExpired as e:
+        print(
+            f"실패: 어댑터 호출이 timeout 으로 재시도까지 실패했습니다 (limit={e.timeout}s).",
+            file=sys.stderr,
+        )
+        print("다음 조치: 네트워크 / quota / 어댑터 부하를 확인한 뒤 다시 실행하세요.", file=sys.stderr)
+        return 2
+    except RuntimeError as e:
+        print(f"실패: 어댑터 호출 오류 — {e}", file=sys.stderr)
+        print("다음 조치: 위 메시지로 어댑터 출력을 확인하고 다시 실행하세요.", file=sys.stderr)
+        return 2
+
     print(json.dumps(result, ensure_ascii=False))
     print(f"artifacts: {store.orch_dir(target) / 'artifacts'}")
     return 0
