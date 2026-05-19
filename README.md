@@ -20,7 +20,7 @@ orch-engine/
     base.py       Adapter 인터페이스 (역할별 응답 contract)
     scripted.py   ScriptedAdapter (가짜 응답으로 루프 검증용)
   tools/
-    mvp_smoke.py  2 사이클 자동 개선 + STOP smoke
+    mvp_smoke.py  2 사이클 자동 개선 + STOP smoke (그 외 실패 경로 smoke 도 같은 폴더)
   templates/
     orch/         init 시 대상 폴더에 복사되는 .orch 템플릿
 ```
